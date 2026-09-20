@@ -4,7 +4,7 @@ import base64
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from agent_hub.orchestrator import MAX_TOOL_ITERATIONS, handle_message
+from agent_hub.orchestrator import MAX_TOOL_ITERATIONS, Status, handle_message
 
 # --- Fakes -------------------------------------------------------------
 
@@ -70,6 +70,7 @@ async def test_immediate_end_turn_returns_text_no_attachments() -> None:
     result = await handle_message("hello", hub, claude, "claude-opus-5")
 
     assert result.text == "hi there"
+    assert result.status == Status.AUTONOMOUS
     assert result.attachments == []
     assert hub.calls == []
 
@@ -95,6 +96,7 @@ async def test_single_tool_call_feeds_result_back_and_returns_final_text() -> No
     result = await handle_message("find the invoice", hub, claude, "claude-opus-5")
 
     assert result.text == "found 1 email"
+    assert result.status == Status.AUTONOMOUS
     assert hub.calls == [("email__search_emails", {"query": "invoice"})]
     # the tool result was appended as the next user turn
     second_call_messages = claude.messages.calls[1]["messages"]
@@ -131,6 +133,7 @@ async def test_get_attachment_call_is_extracted_as_a_real_attachment() -> None:
     result = await handle_message("show me the pdf", hub, claude, "claude-opus-5")
 
     assert result.text == "here is the pdf"
+    assert result.status == Status.AUTONOMOUS
     assert len(result.attachments) == 1
     attachment = result.attachments[0]
     assert attachment.filename == "invoice.pdf"
@@ -153,6 +156,7 @@ async def test_tool_error_becomes_error_tool_result_and_loop_continues() -> None
     result = await handle_message("find x", hub, claude, "claude-opus-5")
 
     assert result.text == "couldn't find it"
+    assert result.status == Status.ERROR
     second_call_messages = claude.messages.calls[1]["messages"]
     tool_result_msg = second_call_messages[-1]
     assert tool_result_msg["content"][0]["is_error"] is True
@@ -173,4 +177,55 @@ async def test_runaway_tool_loop_is_capped() -> None:
     result = await handle_message("loop forever", hub, claude, "claude-opus-5")
 
     assert "too many steps" in result.text
+    assert result.status == Status.ERROR
     assert len(hub.calls) == MAX_TOOL_ITERATIONS
+
+
+async def test_request_send_approval_call_sets_pending_approval_status() -> None:
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t1", "email__request_send_approval", {"draft_id": "d1"})],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("waiting on a human to approve")]),
+        ]
+    )
+    hub = FakeToolHub(
+        {
+            "email__request_send_approval": FakeToolResult(
+                content=[SimpleNamespace(type="text", text='{"status": "pending"}')]
+            )
+        }
+    )
+
+    result = await handle_message("send it", hub, claude, "claude-opus-5")
+
+    assert result.status == Status.PENDING_APPROVAL
+
+
+async def test_error_outranks_pending_approval_in_the_same_turn() -> None:
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[
+                    tool_use_block("t1", "email__request_send_approval", {"draft_id": "d1"}),
+                    tool_use_block("t2", "email__search_emails", {"query": "x"}),
+                ],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("done")]),
+        ]
+    )
+    hub = FakeToolHub(
+        {
+            "email__request_send_approval": FakeToolResult(
+                content=[SimpleNamespace(type="text", text='{"status": "pending"}')]
+            )
+            # email__search_emails left unconfigured -> raises -> ERROR
+        }
+    )
+
+    result = await handle_message("send it and search", hub, claude, "claude-opus-5")
+
+    assert result.status == Status.ERROR

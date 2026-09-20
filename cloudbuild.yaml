@@ -1,0 +1,62 @@
+# Cloud Build CI/CD: build the image, push it to Artifact Registry, deploy to
+# Cloud Run. Mirrors email-mcp-server's cloudbuild.yaml, with two differences
+# that matter for a long-polling worker instead of a request-driven service:
+# --no-cpu-throttling (this process does real work with no inbound HTTP
+# requests to trigger CPU allocation - without this flag Cloud Run starves it
+# between health-check hits) and --max-instances=1 pinned together with
+# --min-instances=1 (Telegram's long-polling API allows only one active
+# poller per bot token; two instances would fight and both would fail with
+# 409 Conflict).
+substitutions:
+  _REGION: europe-west3
+  _REPO: agent-hub
+  _SERVICE: agent-hub
+  # Comma-separated Telegram chat ids allowed to use the bot. Set as a
+  # trigger-level substitution once known - see README "Deploying".
+  _TELEGRAM_ALLOWED_CHAT_IDS: ""
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+      - --region=${_REGION}
+      - --platform=managed
+      # Not publicly reachable - and doesn't need to be: nothing calls this
+      # service over HTTP. The port only exists for Cloud Run's own health
+      # probe.
+      - --no-allow-unauthenticated
+      - --min-instances=1
+      - --max-instances=1
+      - --no-cpu-throttling
+      - --service-account=agent-hub-run@$PROJECT_ID.iam.gserviceaccount.com
+      - --set-secrets=TELEGRAM_BOT_TOKEN=agent-hub-telegram-bot-token:latest,ANTHROPIC_API_KEY=agent-hub-anthropic-api-key:latest
+      - --update-env-vars=MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

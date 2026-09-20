@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+from enum import Enum
 
 from anthropic import AsyncAnthropic
 
@@ -31,6 +32,31 @@ SYSTEM_PROMPT = (
 )
 
 
+class Status(Enum):
+    """The one-glance trust signal a channel adapter renders (colour, emoji, ...).
+
+    Mirrors the same idea as an L4 self-driving status light: AUTONOMOUS means
+    the agent decided and acted within its own safe bounds (reads only -
+    nothing it did requires trust beyond "it can read this mailbox").
+    PENDING_APPROVAL means it prepared something that needs a human decision
+    outside this loop (see email-mcp-server's approval gate). ERROR means
+    something needs attention. Priority when several tools ran this turn:
+    ERROR > PENDING_APPROVAL > AUTONOMOUS - a single failure or a single
+    pending action is worth surfacing even if everything else went fine.
+    """
+
+    AUTONOMOUS = "autonomous"
+    PENDING_APPROVAL = "pending_approval"
+    ERROR = "error"
+
+
+_STATUS_PRIORITY = {Status.AUTONOMOUS: 0, Status.PENDING_APPROVAL: 1, Status.ERROR: 2}
+
+
+def _combine(current: Status, new: Status) -> Status:
+    return new if _STATUS_PRIORITY[new] > _STATUS_PRIORITY[current] else current
+
+
 @dataclass
 class Attachment:
     filename: str
@@ -41,6 +67,7 @@ class Attachment:
 @dataclass
 class OrchestratorResult:
     text: str
+    status: Status = Status.AUTONOMOUS
     attachments: list[Attachment] = field(default_factory=list)
 
 
@@ -50,6 +77,7 @@ async def handle_message(
     messages: list[dict] = [{"role": "user", "content": text}]
     tools = tool_hub.claude_tools()
     attachments: list[Attachment] = []
+    status = Status.AUTONOMOUS
 
     for _ in range(MAX_TOOL_ITERATIONS):
         response = await claude.messages.create(
@@ -62,7 +90,7 @@ async def handle_message(
 
         if response.stop_reason != "tool_use":
             final_text = next((b.text for b in response.content if b.type == "text"), "")
-            return OrchestratorResult(text=final_text, attachments=attachments)
+            return OrchestratorResult(text=final_text, status=status, attachments=attachments)
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -70,26 +98,32 @@ async def handle_message(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            tool_results.append(await _run_tool(tool_hub, block, attachments))
+            tool_result, tool_status = await _run_tool(tool_hub, block, attachments)
+            tool_results.append(tool_result)
+            status = _combine(status, tool_status)
 
         messages.append({"role": "user", "content": tool_results})
 
     return OrchestratorResult(
         text="Sorry, that took too many steps to answer - try asking in a more specific way.",
+        status=Status.ERROR,
         attachments=attachments,
     )
 
 
-async def _run_tool(tool_hub: McpToolHub, block, attachments: list[Attachment]) -> dict:
+async def _run_tool(tool_hub: McpToolHub, block, attachments: list[Attachment]) -> tuple[dict, Status]:
     try:
         result = await tool_hub.call_tool(block.name, block.input)
     except Exception as exc:  # noqa: BLE001 - any failure becomes a tool_result error, loop must not crash
-        return {
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": f"Error calling {block.name}: {exc}",
-            "is_error": True,
-        }
+        return (
+            {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": f"Error calling {block.name}: {exc}",
+                "is_error": True,
+            },
+            Status.ERROR,
+        )
 
     result_text = "\n".join(c.text for c in result.content if c.type == "text")
 
@@ -103,9 +137,18 @@ async def _run_tool(tool_hub: McpToolHub, block, attachments: list[Attachment]) 
             )
         )
 
-    return {
+    tool_result = {
         "type": "tool_result",
         "tool_use_id": block.id,
         "content": result_text or "(empty result)",
         "is_error": result.is_error,
     }
+
+    if result.is_error:
+        tool_status = Status.ERROR
+    elif block.name.endswith("__request_send_approval"):
+        tool_status = Status.PENDING_APPROVAL
+    else:
+        tool_status = Status.AUTONOMOUS
+
+    return tool_result, tool_status

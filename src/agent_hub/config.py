@@ -7,6 +7,7 @@ see README's "Credentials" section.
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     telegram_bot_token: str
+
+    # Only used to satisfy Cloud Run's health-check port when hosted - this
+    # process is a long-polling worker, not an HTTP service; nothing else
+    # should ever call it. See main.py.
+    port: int = Field(default=8080, gt=0)
 
     # "<name>=<url>,<name>=<url>,..." - one entry per MCP server this agent can
     # use as tools. Tool names are exposed to Claude as "<name>__<tool>" so two

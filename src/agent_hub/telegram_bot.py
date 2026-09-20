@@ -16,10 +16,26 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from agent_hub.config import Settings, get_settings
+from agent_hub.health_server import start_health_server
 from agent_hub.mcp_client import McpToolHub
-from agent_hub.orchestrator import handle_message
+from agent_hub.orchestrator import OrchestratorResult, Status, handle_message
 
 logger = logging.getLogger(__name__)
+
+# The one-glance trust signal from orchestrator.Status, in the one UI surface
+# Telegram actually gives a bot: coloured emoji. Same L4-autonomy idea the
+# eventual email add-on's own colour palette will reuse - see
+# orchestrator.Status's docstring for what each level means.
+_STATUS_EMOJI = {
+    Status.AUTONOMOUS: "\U0001f7e2",  # green circle
+    Status.PENDING_APPROVAL: "\U0001f7e1",  # yellow circle
+    Status.ERROR: "\U0001f534",  # red circle
+}
+
+
+def format_reply(result: OrchestratorResult) -> str:
+    emoji = _STATUS_EMOJI[result.status]
+    return f"{emoji} {result.text}" if result.text else emoji
 
 
 def build_application(settings: Settings) -> Application:
@@ -44,8 +60,7 @@ def build_application(settings: Settings) -> Application:
             await message.reply_text("Sorry, something went wrong answering that. Try again shortly.")
             return
 
-        if result.text:
-            await message.reply_text(result.text)
+        await message.reply_text(format_reply(result))
         for attachment in result.attachments:
             await message.reply_document(
                 document=io.BytesIO(attachment.data),
@@ -60,6 +75,7 @@ def build_application(settings: Settings) -> Application:
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
+    start_health_server(settings.port)  # Cloud Run's health probe only; not a real API
     application = build_application(settings)
     logger.info(
         "agent-hub starting: %d authorized chat(s), MCP servers: %s",
