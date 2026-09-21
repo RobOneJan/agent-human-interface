@@ -33,9 +33,14 @@ def _base_url(mcp_server_url: str) -> str:
     return mcp_server_url.rsplit("/mcp", 1)[0]
 
 
-async def decide_approval(mcp_server_url: str, approval_id: str, *, approve: bool) -> dict:
+async def decide_approval(mcp_server_url: str, approval_id: str, tenant_id: str, *, approve: bool) -> dict:
     action = "approve" if approve else "reject"
-    url = f"{_base_url(mcp_server_url)}/internal/approvals/{approval_id}/{action}"
+    # The server resolves the pending approval's own tenant from this query
+    # param (see email-mcp-server's mcp/server.py:_decide_from_channel) - it
+    # must match the tenant that originally called request_send_approval, or
+    # the server reports "no such pending approval" (approvals are stored
+    # per-tenant, same as everything else - see that server's README).
+    url = f"{_base_url(mcp_server_url)}/internal/approvals/{approval_id}/{action}?tenant={tenant_id}"
     headers = fetch_auth_header(mcp_server_url)
     async with httpx2.AsyncClient(timeout=15.0) as client:
         response = await client.post(url, headers=headers, content=b"")

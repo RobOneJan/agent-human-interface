@@ -69,7 +69,7 @@ def approval_keyboard(pending: PendingApproval) -> InlineKeyboardMarkup:
 
 
 def build_application(settings: Settings) -> Application:
-    allowed_chat_ids = settings.parsed_allowed_chat_ids()
+    chat_tenants = settings.parsed_chat_tenants()  # chat_id -> tenant_id; also the access-control list (its keys)
     mcp_servers = settings.parsed_mcp_servers()
     claude = AsyncAnthropic()
     # In-memory only, keyed by chat_id. Fine because this process is a
@@ -83,12 +83,13 @@ def build_application(settings: Settings) -> Application:
         message = update.message
         if chat is None or message is None or not message.text:
             return
-        if chat.id not in allowed_chat_ids:
+        tenant_id = chat_tenants.get(chat.id)
+        if tenant_id is None:
             logger.warning("ignoring message from unauthorized chat_id=%s", chat.id)
             return
 
         try:
-            async with McpToolHub(mcp_servers) as tool_hub:
+            async with McpToolHub(mcp_servers, tenant_id=tenant_id) as tool_hub:
                 result, history = await handle_message(
                     message.text,
                     tool_hub,
@@ -122,8 +123,11 @@ def build_application(settings: Settings) -> Application:
         await query.answer()  # dismiss Telegram's loading spinner regardless of outcome
 
         chat = update.effective_chat
-        if chat is None or chat.id not in allowed_chat_ids:
-            logger.warning("ignoring approval callback from unauthorized chat_id=%s", chat.id if chat else None)
+        if chat is None:
+            return
+        tenant_id = chat_tenants.get(chat.id)
+        if tenant_id is None:
+            logger.warning("ignoring approval callback from unauthorized chat_id=%s", chat.id)
             return
 
         action, server, approval_id = parse_approval_callback_data(query.data)
@@ -133,7 +137,7 @@ def build_application(settings: Settings) -> Application:
             return
 
         try:
-            decision = await decide_approval(server_url, approval_id, approve=action == "approve")
+            decision = await decide_approval(server_url, approval_id, tenant_id, approve=action == "approve")
         except ApprovalDecisionError as exc:
             logger.warning("approval decision failed: chat_id=%s detail=%s", chat.id, exc.detail)
             await query.edit_message_text(f"{_STATUS_EMOJI[Status.ERROR]} Couldn't {action}: {exc.detail}")

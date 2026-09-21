@@ -44,3 +44,18 @@ def test_parses_allowed_chat_ids() -> None:
 def test_empty_allowed_chat_ids_is_empty_set() -> None:
     settings = _settings(telegram_allowed_chat_ids="")
     assert settings.parsed_allowed_chat_ids() == set()
+
+
+def test_bare_chat_id_maps_to_default_tenant() -> None:
+    settings = _settings(telegram_allowed_chat_ids="111,222")
+    assert settings.parsed_chat_tenants() == {111: "default", 222: "default"}
+
+
+def test_chat_id_with_explicit_tenant_is_routed_to_it() -> None:
+    settings = _settings(telegram_allowed_chat_ids="111,222=friend-terbox")
+    assert settings.parsed_chat_tenants() == {111: "default", 222: "friend-terbox"}
+
+
+def test_parsed_allowed_chat_ids_is_derived_from_chat_tenants_keys() -> None:
+    settings = _settings(telegram_allowed_chat_ids=" 111, 222=friend-terbox ")
+    assert settings.parsed_allowed_chat_ids() == {111, 222}

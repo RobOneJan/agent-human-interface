@@ -37,10 +37,10 @@ async def test_decide_approval_success_returns_json(patch_transport) -> None:
 
     patch_transport(handler)
 
-    result = await decide_approval("http://localhost:8080/mcp", "abc", approve=True)
+    result = await decide_approval("http://localhost:8080/mcp", "abc", "friend-tenant", approve=True)
 
     assert result == {"id": "abc", "status": "approved", "resource_id": "draft-1"}
-    assert captured["url"] == "http://localhost:8080/internal/approvals/abc/approve"
+    assert captured["url"] == "http://localhost:8080/internal/approvals/abc/approve?tenant=friend-tenant"
 
 
 async def test_decide_approval_reject_hits_reject_path(patch_transport) -> None:
@@ -52,9 +52,9 @@ async def test_decide_approval_reject_hits_reject_path(patch_transport) -> None:
 
     patch_transport(handler)
 
-    await decide_approval("http://localhost:8080/mcp", "abc", approve=False)
+    await decide_approval("http://localhost:8080/mcp", "abc", "default", approve=False)
 
-    assert captured["url"] == "http://localhost:8080/internal/approvals/abc/reject"
+    assert captured["url"] == "http://localhost:8080/internal/approvals/abc/reject?tenant=default"
 
 
 async def test_decide_approval_404_raises_with_detail(patch_transport) -> None:
@@ -64,7 +64,7 @@ async def test_decide_approval_404_raises_with_detail(patch_transport) -> None:
     patch_transport(handler)
 
     with pytest.raises(ApprovalDecisionError) as exc_info:
-        await decide_approval("http://localhost:8080/mcp", "missing", approve=True)
+        await decide_approval("http://localhost:8080/mcp", "missing", "default", approve=True)
 
     assert exc_info.value.status_code == 404
     assert "no such pending approval" in exc_info.value.detail
@@ -77,6 +77,6 @@ async def test_decide_approval_409_raises_with_detail(patch_transport) -> None:
     patch_transport(handler)
 
     with pytest.raises(ApprovalDecisionError) as exc_info:
-        await decide_approval("http://localhost:8080/mcp", "abc", approve=True)
+        await decide_approval("http://localhost:8080/mcp", "abc", "default", approve=True)
 
     assert exc_info.value.status_code == 409

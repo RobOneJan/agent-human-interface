@@ -10,6 +10,11 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Mirrors email-mcp-server's own domain.identity.DEFAULT_TENANT_ID string -
+# no import dependency between the two repos, just the same convention: "no
+# explicit tenant" means the original single mailbox.
+DEFAULT_TENANT_ID = "default"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -27,8 +32,12 @@ class Settings(BaseSettings):
     # without touching orchestrator.py.
     mcp_servers: str
 
-    # Comma-separated Telegram chat ids allowed to talk to this bot. Anyone not
-    # on this list is ignored - there is no self-serve signup flow (see README).
+    # Comma-separated Telegram chat ids allowed to talk to this bot, each
+    # optionally mapped to a tenant_id (which mailbox it reaches, on the email
+    # MCP server side): "<chat_id>" or "<chat_id>=<tenant_id>". A bare chat_id
+    # maps to tenant "default" (this bot's original single mailbox) - fully
+    # backward compatible with a plain comma-separated id list. Anyone not on
+    # this list is ignored - there is no self-serve signup flow (see README).
     telegram_allowed_chat_ids: str
 
     # Stepped down from claude-opus-5 for cost - see README "Cost". Override
@@ -54,8 +63,23 @@ class Settings(BaseSettings):
             raise ValueError("MCP_SERVERS must list at least one name=url entry")
         return servers
 
+    def parsed_chat_tenants(self) -> dict[int, str]:
+        """chat_id -> tenant_id, from `telegram_allowed_chat_ids`'s
+        "<chat_id>" or "<chat_id>=<tenant_id>" entries (see the field's own
+        docstring). This is both the access-control list (its keys) and the
+        tenant routing table - one source of truth instead of two lists that
+        could drift apart."""
+        tenants: dict[int, str] = {}
+        for entry in self.telegram_allowed_chat_ids.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            chat_id_part, _, tenant_part = entry.partition("=")
+            tenants[int(chat_id_part.strip())] = tenant_part.strip() or DEFAULT_TENANT_ID
+        return tenants
+
     def parsed_allowed_chat_ids(self) -> set[int]:
-        return {int(x.strip()) for x in self.telegram_allowed_chat_ids.split(",") if x.strip()}
+        return set(self.parsed_chat_tenants().keys())
 
 
 def get_settings() -> Settings:

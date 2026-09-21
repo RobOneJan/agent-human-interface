@@ -133,6 +133,27 @@ cp .env.example .env   # fill in the values below
   Find your own chat id by messaging the bot once and checking the logs, or
   via [@userinfobot](https://t.me/userinfobot).
 
+  Each entry is `<chat_id>` or `<chat_id>=<tenant_id>` - a bare chat_id maps
+  to tenant `"default"` (this bot's original single mailbox), so an existing
+  plain comma-separated list needs no changes. Use `<chat_id>=<tenant_id>`
+  to let a *different* chat reach a *different* mailbox through this same
+  bot - e.g. a friend's own mailbox, onboarded on the email-mcp-server side
+  via `scripts/gmail_auth.py --tenant <id>` or `scripts/imap_auth.py --tenant <id>`
+  (see that repo's README). Example:
+  `TELEGRAM_ALLOWED_CHAT_IDS=8811142957,123456789=friend-terbox`.
+
+  This works by sending an `X-Tenant-Id: <tenant_id>` header on every MCP
+  call for that chat (see `mcp_client.py`) and a matching `?tenant=<tenant_id>`
+  query param on every approval decision (see `approvals.py`) - each chat
+  only ever sees and can approve sends for its own tenant's mailbox, never
+  another chat's. This is not itself an authentication mechanism (a header
+  is client-supplied input) - it only works because the whole connection to
+  the MCP server is already gated by Cloud Run IAM (see `auth.py`), so the
+  target server only trusts this bot's own already-authorized chat/tenant
+  mapping because it already trusts this bot as a whole. Do not point
+  `MCP_SERVERS` at a server you would not already trust with every listed
+  tenant's mailbox.
+
 ### Run
 
 ```bash

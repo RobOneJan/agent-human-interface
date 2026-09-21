@@ -18,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 from agent_hub.auth import fetch_auth_header
 
 TOOL_SEPARATOR = "__"
+TENANT_HEADER = "X-Tenant-Id"
 
 
 def qualify_tool_name(server_name: str, tool_name: str) -> str:
@@ -35,15 +36,23 @@ class McpToolHub:
     """Async context manager. On entry, connects to every configured MCP
     server and lists their tools; on exit, closes every connection."""
 
-    def __init__(self, servers: dict[str, str]) -> None:
+    def __init__(self, servers: dict[str, str], tenant_id: str) -> None:
         self._server_urls = servers
+        self._tenant_id = tenant_id
         self._stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._claude_tools: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> Self:
         for name, url in self._server_urls.items():
-            headers = fetch_auth_header(url)
+            # X-Tenant-Id tells a multi-tenant MCP server (see
+            # email-mcp-server's mcp/tools.py:_resolve_tenant_id) which of
+            # this bot's own already-authorized chats a call is for. It is
+            # not itself an authentication mechanism - the target server only
+            # trusts it because the whole connection is already gated by
+            # fetch_auth_header's Cloud Run IAM token (or a trusted local
+            # proxy); a server that isn't multi-tenant-aware just ignores it.
+            headers = {**fetch_auth_header(url), TENANT_HEADER: self._tenant_id}
             http_client = httpx2.AsyncClient(headers=headers, timeout=30.0)
             read_stream, write_stream = await self._stack.enter_async_context(
                 streamable_http_client(url, http_client=http_client)
