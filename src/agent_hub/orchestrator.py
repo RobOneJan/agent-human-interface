@@ -105,6 +105,7 @@ async def handle_message(
     claude: AsyncAnthropic,
     model: str,
     history: list[dict] | None = None,
+    effort: str = "low",
 ) -> tuple[OrchestratorResult, list[dict]]:
     """`history` is the prior conversation (already-sent messages, in Claude's
     own `messages` shape) - pass back whatever this returns as `history` on
@@ -112,7 +113,12 @@ async def handle_message(
     empty list) for a fresh conversation. Trimmed to the most recent
     `MAX_HISTORY_MESSAGES` entries before returning, since Claude's API is
     stateless and resends the full history on every call - unbounded growth
-    means unbounded per-message cost and latency."""
+    means unbounded per-message cost and latency.
+
+    `effort` (low|medium|high|xhigh|max) is fixed for the whole conversation,
+    not per-turn: changing it mid-conversation invalidates the prompt cache
+    (see the cache_control comment below), so it must stay constant across a
+    chat_id's history for the caching win to hold."""
     messages: list[dict] = [*(history or []), {"role": "user", "content": text}]
     tools = tool_hub.claude_tools()
     attachments: list[Attachment] = []
@@ -133,6 +139,7 @@ async def handle_message(
             tools=tools,
             messages=messages,
             cache_control={"type": "ephemeral", "ttl": "1h"},
+            output_config={"effort": effort},
         )
 
         if response.stop_reason != "tool_use":

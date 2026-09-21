@@ -90,7 +90,12 @@ def build_application(settings: Settings) -> Application:
         try:
             async with McpToolHub(mcp_servers) as tool_hub:
                 result, history = await handle_message(
-                    message.text, tool_hub, claude, settings.claude_model, chat_history.get(chat.id)
+                    message.text,
+                    tool_hub,
+                    claude,
+                    settings.claude_model,
+                    chat_history.get(chat.id),
+                    effort=settings.claude_effort,
                 )
             chat_history[chat.id] = history
         except Exception:

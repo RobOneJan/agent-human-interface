@@ -31,7 +31,14 @@ class Settings(BaseSettings):
     # on this list is ignored - there is no self-serve signup flow (see README).
     telegram_allowed_chat_ids: str
 
-    claude_model: str = "claude-opus-5"
+    # Stepped down from claude-opus-5 for cost - see README "Cost". Override
+    # via env if quality doesn't hold up for your traffic.
+    claude_model: str = "claude-sonnet-5"
+    # low | medium | high | xhigh | max. This workload (short email Q&A,
+    # usually 1-3 tool calls) is closest to the "research and knowledge
+    # work" shape in Anthropic's own cost-optimization guide, where low
+    # effort gave up little accuracy for real savings - see README "Cost".
+    claude_effort: str = "low"
 
     def parsed_mcp_servers(self) -> dict[str, str]:
         servers: dict[str, str] = {}

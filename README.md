@@ -73,11 +73,14 @@ on the target Cloud Run service, same as for `/mcp` itself.
 
 ## Cost
 
-No eval exists in this project yet, so only changes with no quality
-tradeoff are applied automatically - anything that trades capability for
-cost (effort level, model tier) is a decision for whoever runs this, not a
-default I pick. Applied so far, both free wins (no eval needed - they don't
-change model behavior):
+No eval exists in this project, so there is no automated way to tell a real
+saving from a quality regression - these levers were applied on an explicit
+decision to prioritize cost over the (unmeasured) quality cost, not because
+an eval cleared them. If replies start feeling worse, that trade is the
+first thing to revisit - bump `CLAUDE_EFFORT` up before reaching for
+`CLAUDE_MODEL`, per the stepping-down order below.
+
+Free wins (no quality tradeoff, so these stay on regardless):
 
 - **Prompt caching** (`orchestrator.py`'s `cache_control={"type": "ephemeral", "ttl": "1h"}`
   on every `messages.create()` call) - system prompt, tool schemas, and the
@@ -90,17 +93,19 @@ change model behavior):
   tool result sent back to Claude is replaced with a short confirmation
   once the attachment is captured.
 
-Not yet applied - proposed, pending a decision (and ideally an eval to
-validate quality holds):
+Tradeoffs (capability traded for cost - applied on request, unvalidated):
 
-- **Lower `effort`** on `claude-opus-5` (currently unset, which runs
-  adaptive thinking at the `high` default) - this workload's shape (short
-  email Q&A, usually 1-3 tool calls) resembles the "research and knowledge
-  work" curve in Anthropic's own published cost-optimization guide, where
-  `low`/`medium` gave up little accuracy for real savings. Untested here.
-- **Model tier** (`claude-sonnet-5` instead of `claude-opus-5`) - per the
-  guide's own ordering, sweep effort on the current model before touching
-  this.
+- **`CLAUDE_EFFORT=low`** (`config.py`, passed as `output_config={"effort": ...}`)
+  - this workload's shape (short email Q&A, usually 1-3 tool calls)
+  resembles the "research and knowledge work" curve in Anthropic's own
+  cost-optimization guide, where `low` gave up little accuracy for real
+  savings on their benchmarks - but that curve is theirs, not measured on
+  this traffic. Fixed for a whole conversation (`handle_message`'s
+  docstring): changing it mid-chat would invalidate the prompt cache above.
+- **`CLAUDE_MODEL=claude-sonnet-5`** (stepped down from `claude-opus-5`) -
+  applied together with the effort change rather than swept one at a time
+  against an eval, so if quality drops there's no data saying which lever
+  caused it. Revert either independently via env var if needed.
 
 ## Setup
 

@@ -145,6 +145,12 @@ async def test_get_attachment_call_is_extracted_as_a_real_attachment() -> None:
     assert attachment.filename == "invoice.pdf"
     assert attachment.content_type == "application/pdf"
     assert attachment.data == raw_bytes
+    # token hygiene: the raw base64 must not be resent to Claude - Claude
+    # never needed it, and it would also become permanent history cost
+    second_call_messages = claude.messages.calls[1]["messages"]
+    tool_result_content = second_call_messages[-1]["content"][0]["content"]
+    assert base64.b64encode(raw_bytes).decode() not in tool_result_content
+    assert "invoice.pdf" in tool_result_content
 
 
 async def test_tool_error_becomes_error_tool_result_and_loop_continues() -> None:
@@ -282,3 +288,30 @@ async def test_history_is_trimmed_to_max_history_messages() -> None:
     assert len(new_history) == MAX_HISTORY_MESSAGES
     # the trim keeps the most recent messages, not the oldest
     assert new_history[0]["content"] != "message 0"
+
+
+async def test_effort_defaults_to_low_and_is_sent_as_output_config() -> None:
+    claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("ok")])])
+    hub = FakeToolHub()
+
+    await handle_message("hi", hub, claude, "claude-sonnet-5")
+
+    assert claude.messages.calls[0]["output_config"] == {"effort": "low"}
+
+
+async def test_effort_is_overridable() -> None:
+    claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("ok")])])
+    hub = FakeToolHub()
+
+    await handle_message("hi", hub, claude, "claude-sonnet-5", effort="medium")
+
+    assert claude.messages.calls[0]["output_config"] == {"effort": "medium"}
+
+
+async def test_cache_control_is_set_on_every_call() -> None:
+    claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("ok")])])
+    hub = FakeToolHub()
+
+    await handle_message("hi", hub, claude, "claude-sonnet-5")
+
+    assert claude.messages.calls[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
