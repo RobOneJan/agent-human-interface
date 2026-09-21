@@ -13,13 +13,14 @@ import logging
 import sys
 
 from anthropic import AsyncAnthropic
-from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
+from agent_hub.approvals import ApprovalDecisionError, decide_approval
 from agent_hub.config import Settings, get_settings
 from agent_hub.health_server import start_health_server
 from agent_hub.mcp_client import McpToolHub
-from agent_hub.orchestrator import OrchestratorResult, Status, handle_message
+from agent_hub.orchestrator import OrchestratorResult, PendingApproval, Status, handle_message
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,38 @@ _STATUS_EMOJI = {
     Status.ERROR: "\U0001f534",  # red circle
 }
 
+_CALLBACK_SEP = ":"
+
 
 def format_reply(result: OrchestratorResult) -> str:
     emoji = _STATUS_EMOJI[result.status]
     return f"{emoji} {result.text}" if result.text else emoji
+
+
+def approval_callback_data(action: str, server: str, approval_id: str) -> str:
+    return _CALLBACK_SEP.join((action, server, approval_id))
+
+
+def parse_approval_callback_data(data: str) -> tuple[str, str, str]:
+    action, server, approval_id = data.split(_CALLBACK_SEP, 2)
+    return action, server, approval_id
+
+
+def approval_keyboard(pending: PendingApproval) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Freigeben",
+                    callback_data=approval_callback_data("approve", pending.server, pending.approval_id),
+                ),
+                InlineKeyboardButton(
+                    "❌ Ablehnen",
+                    callback_data=approval_callback_data("reject", pending.server, pending.approval_id),
+                ),
+            ]
+        ]
+    )
 
 
 def build_application(settings: Settings) -> Application:
@@ -67,9 +96,43 @@ def build_application(settings: Settings) -> Application:
                 document=io.BytesIO(attachment.data),
                 filename=attachment.filename,
             )
+        for pending in result.pending_approvals:
+            await message.reply_text(
+                f"{_STATUS_EMOJI[Status.PENDING_APPROVAL]} {pending.message}",
+                reply_markup=approval_keyboard(pending),
+            )
+
+    async def on_approval_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+        await query.answer()  # dismiss Telegram's loading spinner regardless of outcome
+
+        chat = update.effective_chat
+        if chat is None or chat.id not in allowed_chat_ids:
+            logger.warning("ignoring approval callback from unauthorized chat_id=%s", chat.id if chat else None)
+            return
+
+        action, server, approval_id = parse_approval_callback_data(query.data)
+        server_url = mcp_servers.get(server)
+        if server_url is None:
+            await query.edit_message_text(f"{_STATUS_EMOJI[Status.ERROR]} Unknown server {server!r}.")
+            return
+
+        try:
+            decision = await decide_approval(server_url, approval_id, approve=action == "approve")
+        except ApprovalDecisionError as exc:
+            logger.warning("approval decision failed: chat_id=%s detail=%s", chat.id, exc.detail)
+            await query.edit_message_text(f"{_STATUS_EMOJI[Status.ERROR]} Couldn't {action}: {exc.detail}")
+            return
+
+        emoji = _STATUS_EMOJI[Status.AUTONOMOUS] if action == "approve" else _STATUS_EMOJI[Status.ERROR]
+        verb = "Freigegeben" if action == "approve" else "Abgelehnt"
+        await query.edit_message_text(f"{emoji} {verb} ({decision['status']}).")
 
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    application.add_handler(CallbackQueryHandler(on_approval_callback))
     return application
 
 

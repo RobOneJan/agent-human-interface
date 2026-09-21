@@ -43,6 +43,33 @@ Add-on     --adapter-->
   manual loop, not the SDK's Tool Runner: a `get_attachment` tool result
   needs to become a real file sent to the user, not just text Claude
   describes, which requires inspecting every raw tool result here.
+- **`approvals.py`** - calls a server's `/internal/approvals/{id}/approve`
+  or `.../reject` HTTP route directly (see below). Deliberately separate
+  from `mcp_client.py`/`orchestrator.py`: it is never reachable from the
+  tool-use loop, only from a human-triggered Telegram button.
+
+## Approving from Telegram
+
+When a `request_send_approval` MCP call comes back PENDING, `on_message`
+sends a follow-up Telegram message with two inline buttons (`callback_data`
+encodes `action:server:approval_id`, e.g. `approve:email:<uuid>`). Tapping
+one fires `telegram_bot.py`'s `CallbackQueryHandler`, which calls
+`approvals.decide_approval()` - a plain HTTP POST to the target MCP
+server's `/internal/approvals/{id}/approve` (or `.../reject`) route.
+
+This preserves the guarantee `email-mcp-server`'s approval flow already
+has: **the LLM can never approve its own send.** The button-tap handler is
+a completely different code path from `orchestrator.handle_message()` - the
+model driving the tool-use loop has no tool that reaches
+`approvals.decide_approval()`, and no way to synthesize a Telegram
+`callback_query` update (that only exists because a human actually tapped a
+button in their Telegram client). See `email-mcp-server`'s README,
+"Approving from a chat channel", for the server side of this.
+
+Auth for the approval call reuses `auth.py` exactly like any other call to
+that MCP server - the calling identity (your `gcloud` login locally, or
+`agent-hub-run`'s service account once deployed) needs `roles/run.invoker`
+on the target Cloud Run service, same as for `/mcp` itself.
 
 ## Setup
 
@@ -93,11 +120,6 @@ All tests are offline (fake Claude client, fake MCP tool hub) - no
 - One MCP session is opened fresh per message (not pooled/reused across
   messages) - simplest correct thing; revisit only if latency becomes a
   real problem.
-- No per-channel approval-gate UX yet (e.g. a Telegram inline
-  approve/reject button for `send_email`) - the underlying MCP server still
-  requires out-of-band human approval via `scripts/approve_request.py`
-  regardless, so nothing unsafe is possible, but there is no convenient way
-  to trigger that approval from Telegram yet.
 - No conversation memory across messages - each message is a fresh,
   independent request to Claude. Add history if/when a real conversation
   (not one-shot Q&A) is needed.

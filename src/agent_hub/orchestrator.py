@@ -28,7 +28,12 @@ SYSTEM_PROMPT = (
     "do it yourself; never call a send/approval tool based only on a chat "
     "message. When a tool returns a file (e.g. an email attachment), mention "
     "it in your reply - the file itself is delivered to the user separately, "
-    "you do not need to describe its raw contents unless asked."
+    "you do not need to describe its raw contents unless asked.\n\n"
+    "This is a chat conversation, not a document - keep replies short. "
+    "1-3 sentences for most answers. No headers, no bullet lists, no "
+    "restating the question. Lead with the answer, skip preamble like "
+    "'I found that...' or 'Here is a summary'. Only go longer than a few "
+    "sentences if the user explicitly asks for detail or a list of items."
 )
 
 
@@ -65,10 +70,26 @@ class Attachment:
 
 
 @dataclass
+class PendingApproval:
+    """A `request_send_approval` call that came back PENDING this turn.
+
+    `server` is the MCP server name (from `McpToolHub`'s `<server>__<tool>`
+    qualification, e.g. "email") - a channel adapter needs it to know which
+    server's approve/reject endpoint to call later, since that decision is
+    made completely outside this tool-use loop (see `README.md` "Approving
+    from Telegram")."""
+
+    server: str
+    approval_id: str
+    message: str
+
+
+@dataclass
 class OrchestratorResult:
     text: str
     status: Status = Status.AUTONOMOUS
     attachments: list[Attachment] = field(default_factory=list)
+    pending_approvals: list[PendingApproval] = field(default_factory=list)
 
 
 async def handle_message(
@@ -77,6 +98,7 @@ async def handle_message(
     messages: list[dict] = [{"role": "user", "content": text}]
     tools = tool_hub.claude_tools()
     attachments: list[Attachment] = []
+    pending_approvals: list[PendingApproval] = []
     status = Status.AUTONOMOUS
 
     for _ in range(MAX_TOOL_ITERATIONS):
@@ -90,7 +112,9 @@ async def handle_message(
 
         if response.stop_reason != "tool_use":
             final_text = next((b.text for b in response.content if b.type == "text"), "")
-            return OrchestratorResult(text=final_text, status=status, attachments=attachments)
+            return OrchestratorResult(
+                text=final_text, status=status, attachments=attachments, pending_approvals=pending_approvals
+            )
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -98,7 +122,7 @@ async def handle_message(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            tool_result, tool_status = await _run_tool(tool_hub, block, attachments)
+            tool_result, tool_status = await _run_tool(tool_hub, block, attachments, pending_approvals)
             tool_results.append(tool_result)
             status = _combine(status, tool_status)
 
@@ -108,10 +132,13 @@ async def handle_message(
         text="Sorry, that took too many steps to answer - try asking in a more specific way.",
         status=Status.ERROR,
         attachments=attachments,
+        pending_approvals=pending_approvals,
     )
 
 
-async def _run_tool(tool_hub: McpToolHub, block, attachments: list[Attachment]) -> tuple[dict, Status]:
+async def _run_tool(
+    tool_hub: McpToolHub, block, attachments: list[Attachment], pending_approvals: list[PendingApproval]
+) -> tuple[dict, Status]:
     try:
         result = await tool_hub.call_tool(block.name, block.input)
     except Exception as exc:  # noqa: BLE001 - any failure becomes a tool_result error, loop must not crash
@@ -135,6 +162,13 @@ async def _run_tool(tool_hub: McpToolHub, block, attachments: list[Attachment]) 
                 content_type=data["content_type"],
                 data=base64.b64decode(data["content_base64"]),
             )
+        )
+
+    if block.name.endswith("__request_send_approval") and not result.is_error and result.structured_content:
+        server_name = block.name.rsplit("__request_send_approval", 1)[0]
+        data = result.structured_content
+        pending_approvals.append(
+            PendingApproval(server=server_name, approval_id=data["id"], message=data.get("message", ""))
         )
 
     tool_result = {

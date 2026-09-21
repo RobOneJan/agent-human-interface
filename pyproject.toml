@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "anthropic[mcp]>=0.115",
     "mcp>=2.0,<3",
+    "httpx2>=2.0",  # approvals.py's own HTTP client - also a transitive dep of anthropic/mcp, declared explicitly since we import it directly
     "python-telegram-bot>=21.0",
     "google-auth>=2.28.0",
     "requests>=2.31.0",  # google.auth.transport.requests needs this explicitly - not pulled in by google-auth alone

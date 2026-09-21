@@ -194,7 +194,13 @@ async def test_request_send_approval_call_sets_pending_approval_status() -> None
     hub = FakeToolHub(
         {
             "email__request_send_approval": FakeToolResult(
-                content=[SimpleNamespace(type="text", text='{"status": "pending"}')]
+                content=[SimpleNamespace(type="text", text='{"status": "pending"}')],
+                structured_content={
+                    "id": "approval-123",
+                    "status": "pending",
+                    "resource_id": "d1",
+                    "message": "Waiting for human approval.",
+                },
             )
         }
     )
@@ -202,6 +208,11 @@ async def test_request_send_approval_call_sets_pending_approval_status() -> None
     result = await handle_message("send it", hub, claude, "claude-opus-5")
 
     assert result.status == Status.PENDING_APPROVAL
+    assert len(result.pending_approvals) == 1
+    pending = result.pending_approvals[0]
+    assert pending.server == "email"
+    assert pending.approval_id == "approval-123"
+    assert pending.message == "Waiting for human approval."
 
 
 async def test_error_outranks_pending_approval_in_the_same_turn() -> None:
