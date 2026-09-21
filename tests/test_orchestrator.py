@@ -4,7 +4,7 @@ import base64
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from agent_hub.orchestrator import MAX_TOOL_ITERATIONS, Status, handle_message
+from agent_hub.orchestrator import MAX_HISTORY_MESSAGES, MAX_TOOL_ITERATIONS, Status, handle_message
 
 # --- Fakes -------------------------------------------------------------
 
@@ -29,7 +29,12 @@ class FakeMessages:
         self.calls: list[dict] = []
 
     async def create(self, **kwargs):
-        self.calls.append(kwargs)
+        # Snapshot messages: a real HTTP client has already serialized the
+        # request body by the time create() returns, so later in-place
+        # mutation of the same list (handle_message appends to it after the
+        # call, to build the returned history) must not retroactively change
+        # what was "sent".
+        self.calls.append({**kwargs, "messages": list(kwargs.get("messages", []))})
         return self._responses.pop(0)
 
 
@@ -67,12 +72,13 @@ async def test_immediate_end_turn_returns_text_no_attachments() -> None:
     claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("hi there")])])
     hub = FakeToolHub()
 
-    result = await handle_message("hello", hub, claude, "claude-opus-5")
+    result, history = await handle_message("hello", hub, claude, "claude-opus-5")
 
     assert result.text == "hi there"
     assert result.status == Status.AUTONOMOUS
     assert result.attachments == []
     assert hub.calls == []
+    assert history[0] == {"role": "user", "content": "hello"}
 
 
 async def test_single_tool_call_feeds_result_back_and_returns_final_text() -> None:
@@ -93,7 +99,7 @@ async def test_single_tool_call_feeds_result_back_and_returns_final_text() -> No
         }
     )
 
-    result = await handle_message("find the invoice", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("find the invoice", hub, claude, "claude-opus-5")
 
     assert result.text == "found 1 email"
     assert result.status == Status.AUTONOMOUS
@@ -130,7 +136,7 @@ async def test_get_attachment_call_is_extracted_as_a_real_attachment() -> None:
         }
     )
 
-    result = await handle_message("show me the pdf", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("show me the pdf", hub, claude, "claude-opus-5")
 
     assert result.text == "here is the pdf"
     assert result.status == Status.AUTONOMOUS
@@ -153,7 +159,7 @@ async def test_tool_error_becomes_error_tool_result_and_loop_continues() -> None
     )
     hub = FakeToolHub()  # no configured result -> call_tool raises
 
-    result = await handle_message("find x", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("find x", hub, claude, "claude-opus-5")
 
     assert result.text == "couldn't find it"
     assert result.status == Status.ERROR
@@ -174,7 +180,7 @@ async def test_runaway_tool_loop_is_capped() -> None:
     claude = FakeClaude(responses)
     hub = FakeToolHub({"email__search_emails": FakeToolResult(content=[SimpleNamespace(type="text", text="ok")])})
 
-    result = await handle_message("loop forever", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("loop forever", hub, claude, "claude-opus-5")
 
     assert "too many steps" in result.text
     assert result.status == Status.ERROR
@@ -205,7 +211,7 @@ async def test_request_send_approval_call_sets_pending_approval_status() -> None
         }
     )
 
-    result = await handle_message("send it", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("send it", hub, claude, "claude-opus-5")
 
     assert result.status == Status.PENDING_APPROVAL
     assert len(result.pending_approvals) == 1
@@ -237,6 +243,42 @@ async def test_error_outranks_pending_approval_in_the_same_turn() -> None:
         }
     )
 
-    result = await handle_message("send it and search", hub, claude, "claude-opus-5")
+    result, _history = await handle_message("send it and search", hub, claude, "claude-opus-5")
 
     assert result.status == Status.ERROR
+
+
+async def test_prior_history_is_sent_with_the_next_message() -> None:
+    claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("Bob, you told me")])])
+    hub = FakeToolHub()
+    prior_history = [
+        {"role": "user", "content": "my name is Bob"},
+        {"role": "assistant", "content": [text_block("Nice to meet you, Bob")]},
+    ]
+
+    result, new_history = await handle_message(
+        "what's my name?", hub, claude, "claude-opus-5", history=prior_history
+    )
+
+    assert result.text == "Bob, you told me"
+    sent_messages = claude.messages.calls[0]["messages"]
+    assert sent_messages[0] == prior_history[0]
+    assert sent_messages[1] == prior_history[1]
+    assert sent_messages[2] == {"role": "user", "content": "what's my name?"}
+    # the new turn is appended onto the returned history, not lost
+    assert new_history[-2] == {"role": "user", "content": "what's my name?"}
+    assert new_history[-1]["role"] == "assistant"
+
+
+async def test_history_is_trimmed_to_max_history_messages() -> None:
+    claude = FakeClaude([FakeResponse(stop_reason="end_turn", content=[text_block("ok")])])
+    hub = FakeToolHub()
+    long_history = [{"role": "user", "content": f"message {i}"} for i in range(MAX_HISTORY_MESSAGES + 10)]
+
+    _result, new_history = await handle_message(
+        "one more", hub, claude, "claude-opus-5", history=long_history
+    )
+
+    assert len(new_history) == MAX_HISTORY_MESSAGES
+    # the trim keeps the most recent messages, not the oldest
+    assert new_history[0]["content"] != "message 0"

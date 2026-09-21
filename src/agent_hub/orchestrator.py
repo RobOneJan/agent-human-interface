@@ -23,12 +23,16 @@ MAX_TOOL_ITERATIONS = 15  # defensive cap - a genuine conversation needs a handf
 SYSTEM_PROMPT = (
     "You are an assistant reachable over chat that can search and read email, "
     "and answer questions using whatever other tools are available to you. "
-    "Sending email always requires a human's separate, out-of-band approval - "
-    "if asked to send or approve something, explain that instead of trying to "
-    "do it yourself; never call a send/approval tool based only on a chat "
-    "message. When a tool returns a file (e.g. an email attachment), mention "
-    "it in your reply - the file itself is delivered to the user separately, "
-    "you do not need to describe its raw contents unless asked.\n\n"
+    "When asked to send an email: go ahead and create the draft and call "
+    "request_send_approval as normal - those are safe, reversible steps that "
+    "do not send anything on their own. The send only completes once a human "
+    "approves it outside this conversation (e.g. by tapping a button in this "
+    "chat); you will never be handed a valid approval_id unless that already "
+    "happened, so you cannot complete a send purely on your own initiative - "
+    "there is no need to refuse or hedge on the request itself. When a tool "
+    "returns a file (e.g. an email attachment), mention it in your reply - "
+    "the file itself is delivered to the user separately, you do not need to "
+    "describe its raw contents unless asked.\n\n"
     "This is a chat conversation, not a document - keep replies short. "
     "1-3 sentences for most answers. No headers, no bullet lists, no "
     "restating the question. Lead with the answer, skip preamble like "
@@ -92,10 +96,24 @@ class OrchestratorResult:
     pending_approvals: list[PendingApproval] = field(default_factory=list)
 
 
+MAX_HISTORY_MESSAGES = 20  # ~10 turns of context; trimmed from the oldest end after each reply
+
+
 async def handle_message(
-    text: str, tool_hub: McpToolHub, claude: AsyncAnthropic, model: str
-) -> OrchestratorResult:
-    messages: list[dict] = [{"role": "user", "content": text}]
+    text: str,
+    tool_hub: McpToolHub,
+    claude: AsyncAnthropic,
+    model: str,
+    history: list[dict] | None = None,
+) -> tuple[OrchestratorResult, list[dict]]:
+    """`history` is the prior conversation (already-sent messages, in Claude's
+    own `messages` shape) - pass back whatever this returns as `history` on
+    the next call for that same chat to keep context. Omit it (or pass an
+    empty list) for a fresh conversation. Trimmed to the most recent
+    `MAX_HISTORY_MESSAGES` entries before returning, since Claude's API is
+    stateless and resends the full history on every call - unbounded growth
+    means unbounded per-message cost and latency."""
+    messages: list[dict] = [*(history or []), {"role": "user", "content": text}]
     tools = tool_hub.claude_tools()
     attachments: list[Attachment] = []
     pending_approvals: list[PendingApproval] = []
@@ -112,9 +130,11 @@ async def handle_message(
 
         if response.stop_reason != "tool_use":
             final_text = next((b.text for b in response.content if b.type == "text"), "")
-            return OrchestratorResult(
+            messages.append({"role": "assistant", "content": response.content})
+            result = OrchestratorResult(
                 text=final_text, status=status, attachments=attachments, pending_approvals=pending_approvals
             )
+            return result, messages[-MAX_HISTORY_MESSAGES:]
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -128,12 +148,13 @@ async def handle_message(
 
         messages.append({"role": "user", "content": tool_results})
 
-    return OrchestratorResult(
+    result = OrchestratorResult(
         text="Sorry, that took too many steps to answer - try asking in a more specific way.",
         status=Status.ERROR,
         attachments=attachments,
         pending_approvals=pending_approvals,
     )
+    return result, messages[-MAX_HISTORY_MESSAGES:]
 
 
 async def _run_tool(

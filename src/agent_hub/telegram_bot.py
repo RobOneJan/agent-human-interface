@@ -72,6 +72,11 @@ def build_application(settings: Settings) -> Application:
     allowed_chat_ids = settings.parsed_allowed_chat_ids()
     mcp_servers = settings.parsed_mcp_servers()
     claude = AsyncAnthropic()
+    # In-memory only, keyed by chat_id. Fine because this process is a
+    # singleton (see cloudbuild.yaml's --max-instances=1) - there is never a
+    # second instance that wouldn't share this state. Lost on restart, same
+    # as drop_pending_updates already accepts for the Telegram side.
+    chat_history: dict[int, list[dict]] = {}
 
     async def on_message(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
@@ -84,7 +89,10 @@ def build_application(settings: Settings) -> Application:
 
         try:
             async with McpToolHub(mcp_servers) as tool_hub:
-                result = await handle_message(message.text, tool_hub, claude, settings.claude_model)
+                result, history = await handle_message(
+                    message.text, tool_hub, claude, settings.claude_model, chat_history.get(chat.id)
+                )
+            chat_history[chat.id] = history
         except Exception:
             logger.exception("failed to handle message from chat_id=%s", chat.id)
             await message.reply_text("Sorry, something went wrong answering that. Try again shortly.")

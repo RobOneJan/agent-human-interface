@@ -120,6 +120,9 @@ All tests are offline (fake Claude client, fake MCP tool hub) - no
 - One MCP session is opened fresh per message (not pooled/reused across
   messages) - simplest correct thing; revisit only if latency becomes a
   real problem.
-- No conversation memory across messages - each message is a fresh,
-  independent request to Claude. Add history if/when a real conversation
-  (not one-shot Q&A) is needed.
+- Conversation history is in-memory only, keyed by `chat_id`
+  (`telegram_bot.py`'s `chat_history` dict), capped at
+  `orchestrator.MAX_HISTORY_MESSAGES`. Fine because this process is a
+  singleton (`--max-instances=1`) - lost on restart/redeploy, same as
+  `drop_pending_updates=True` already accepts for the Telegram side. Move to
+  a real store if history needs to survive a restart.
