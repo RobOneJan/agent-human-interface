@@ -74,6 +74,11 @@ def build_application(settings: Settings) -> Application:
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
+    # httpx (python-telegram-bot's HTTP client) logs full request URLs at INFO,
+    # and Telegram's API puts the bot token directly in the URL path - never
+    # let that reach Cloud Logging. Everything else stays at INFO.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     settings = get_settings()
     start_health_server(settings.port)  # Cloud Run's health probe only; not a real API
     application = build_application(settings)
