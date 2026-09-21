@@ -71,6 +71,37 @@ that MCP server - the calling identity (your `gcloud` login locally, or
 `agent-hub-run`'s service account once deployed) needs `roles/run.invoker`
 on the target Cloud Run service, same as for `/mcp` itself.
 
+## Cost
+
+No eval exists in this project yet, so only changes with no quality
+tradeoff are applied automatically - anything that trades capability for
+cost (effort level, model tier) is a decision for whoever runs this, not a
+default I pick. Applied so far, both free wins (no eval needed - they don't
+change model behavior):
+
+- **Prompt caching** (`orchestrator.py`'s `cache_control={"type": "ephemeral", "ttl": "1h"}`
+  on every `messages.create()` call) - system prompt, tool schemas, and the
+  growing conversation history were being resent and re-billed in full on
+  every single message before this. The 1h TTL (not the 5m default) matches
+  this loop's shape: it waits on a human typing in Telegram between turns.
+- **`get_attachment` result trimming** - the raw tool result carries the
+  full base64 file content (a large PDF is easily >100K tokens); Claude
+  never needs those bytes since the file goes straight to the user, so the
+  tool result sent back to Claude is replaced with a short confirmation
+  once the attachment is captured.
+
+Not yet applied - proposed, pending a decision (and ideally an eval to
+validate quality holds):
+
+- **Lower `effort`** on `claude-opus-5` (currently unset, which runs
+  adaptive thinking at the `high` default) - this workload's shape (short
+  email Q&A, usually 1-3 tool calls) resembles the "research and knowledge
+  work" curve in Anthropic's own published cost-optimization guide, where
+  `low`/`medium` gave up little accuracy for real savings. Untested here.
+- **Model tier** (`claude-sonnet-5` instead of `claude-opus-5`) - per the
+  guide's own ordering, sweep effort on the current model before touching
+  this.
+
 ## Setup
 
 ```bash

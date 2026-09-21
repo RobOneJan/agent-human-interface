@@ -120,12 +120,19 @@ async def handle_message(
     status = Status.AUTONOMOUS
 
     for _ in range(MAX_TOOL_ITERATIONS):
-        response = await claude.messages.create(
+        # tools/messages: schemas and history are built at runtime, not statically
+        # typed against the SDK's TypedDicts. cache_control: caches system+tools+
+        # history as one growing prefix; 1h (not the 5m default) because this loop
+        # waits on a human typing in Telegram between turns - often minutes - and a
+        # 1h write pays for itself on the very first prevented miss (a miss re-bills
+        # the whole prefix at full price *and* re-writes it).
+        response = await claude.messages.create(  # type: ignore[call-overload]
             model=model,
             max_tokens=16000,
             system=SYSTEM_PROMPT,
-            tools=tools,  # type: ignore[arg-type]  # tool schemas come from MCP servers at runtime, not statically typed
-            messages=messages,  # type: ignore[arg-type]
+            tools=tools,
+            messages=messages,
+            cache_control={"type": "ephemeral", "ttl": "1h"},
         )
 
         if response.stop_reason != "tool_use":
@@ -184,6 +191,12 @@ async def _run_tool(
                 data=base64.b64decode(data["content_base64"]),
             )
         )
+        # Token hygiene: the tool's raw result_text carries the full base64
+        # blob (a 512KB attachment is >150K input tokens Claude would
+        # otherwise re-read on every future turn too, via history). Claude
+        # never needs the bytes - the file goes straight to the user above -
+        # so replace it with a short confirmation instead of resending it.
+        result_text = f"Attachment {data['filename']!r} ({data['size_bytes']} bytes) retrieved and already delivered to the user directly - do not describe its contents unless asked."
 
     if block.name.endswith("__request_send_approval") and not result.is_error and result.structured_content:
         server_name = block.name.rsplit("__request_send_approval", 1)[0]
