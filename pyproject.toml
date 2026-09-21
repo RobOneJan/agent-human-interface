@@ -14,6 +14,7 @@ dependencies = [
     "mcp>=2.0,<3",
     "python-telegram-bot>=21.0",
     "google-auth>=2.28.0",
+    "requests>=2.31.0",  # google.auth.transport.requests needs this explicitly - not pulled in by google-auth alone
     "pydantic-settings>=2.2",
     "python-dotenv>=1.0.1",
 ]
