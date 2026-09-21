@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
+import sys
 
 from anthropic import AsyncAnthropic
 from telegram import Update
@@ -87,4 +88,20 @@ def run() -> None:
         len(settings.parsed_allowed_chat_ids()),
         ", ".join(settings.parsed_mcp_servers()),
     )
-    application.run_polling()
+    # drop_pending_updates: on every restart (redeploy, Cloud Run recycling an
+    # instance), start clean rather than replaying a backlog - each message is
+    # a stateless one-shot request here, nothing depends on old updates.
+    #
+    # This call blocks until the polling loop stops, which should only happen
+    # via SIGTERM/SIGINT during an orderly shutdown. Telegram's getUpdates
+    # allows only one active poller per bot token (see cloudbuild.yaml), so a
+    # brief overlap during a redeploy reliably produces 409 Conflict on
+    # whichever instance loses the race - if that ever makes run_polling()
+    # return on its own instead of via a real shutdown signal, exit non-zero
+    # so Cloud Run sees a crashed container and restarts it, instead of
+    # silently leaving a dead instance marked healthy (min-instances keeps
+    # the container running, but the health probe only checks the port, not
+    # whether polling is still alive).
+    application.run_polling(drop_pending_updates=True)
+    logger.error("run_polling() returned unexpectedly - exiting so Cloud Run restarts this instance")
+    sys.exit(1)
