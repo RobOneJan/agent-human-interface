@@ -243,7 +243,8 @@ async def test_error_outranks_pending_approval_in_the_same_turn() -> None:
     hub = FakeToolHub(
         {
             "email__request_send_approval": FakeToolResult(
-                content=[SimpleNamespace(type="text", text='{"status": "pending"}')]
+                content=[SimpleNamespace(type="text", text='{"status": "pending"}')],
+                structured_content={"id": "approval-123", "status": "pending", "message": "Waiting."},
             )
             # email__search_emails left unconfigured -> raises -> ERROR
         }
@@ -315,3 +316,66 @@ async def test_cache_control_is_set_on_every_call() -> None:
     await handle_message("hi", hub, claude, "claude-sonnet-5")
 
     assert claude.messages.calls[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+async def test_approval_detection_works_for_a_differently_named_tool() -> None:
+    """The whole point of shape-based detection: an ERP-style tool that isn't
+    literally called request_send_approval still gets picked up as a pending
+    approval, as long as its structured output matches the same shape."""
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t1", "erp__book_invoice", {"invoice_id": "inv-1"})],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("waiting on approval")]),
+        ]
+    )
+    hub = FakeToolHub(
+        {
+            "erp__book_invoice": FakeToolResult(
+                content=[SimpleNamespace(type="text", text="ok")],
+                structured_content={"id": "erp-approval-1", "status": "pending", "message": "Booking needs approval."},
+            )
+        }
+    )
+
+    result, _history = await handle_message("book the invoice", hub, claude, "claude-opus-5")
+
+    assert result.status == Status.PENDING_APPROVAL
+    assert len(result.pending_approvals) == 1
+    pending = result.pending_approvals[0]
+    assert pending.server == "erp"
+    assert pending.approval_id == "erp-approval-1"
+
+
+async def test_attachment_detection_works_for_a_differently_named_tool() -> None:
+    raw_bytes = b"fake invoice pdf"
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t1", "erp__get_invoice_pdf", {"invoice_id": "inv-1"})],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("here it is")]),
+        ]
+    )
+    hub = FakeToolHub(
+        {
+            "erp__get_invoice_pdf": FakeToolResult(
+                content=[SimpleNamespace(type="text", text="ok")],
+                structured_content={
+                    "filename": "invoice.pdf",
+                    "content_type": "application/pdf",
+                    "size_bytes": len(raw_bytes),
+                    "content_base64": base64.b64encode(raw_bytes).decode(),
+                },
+            )
+        }
+    )
+
+    result, _history = await handle_message("get the invoice pdf", hub, claude, "claude-opus-5")
+
+    assert len(result.attachments) == 1
+    assert result.attachments[0].filename == "invoice.pdf"
+    assert result.attachments[0].data == raw_bytes

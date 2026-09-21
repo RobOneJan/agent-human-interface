@@ -3,9 +3,12 @@ message.
 
 Deliberately a manual loop, not the SDK's Tool Runner (`client.beta.messages.tool_runner`)
 - the Tool Runner calls MCP tools internally and only exposes final text, but
-`handle_message` needs to see every raw tool result itself to intercept
-`get_attachment` calls and hand back real file bytes to the channel adapter,
-not just a text description of them.
+`handle_message` needs to see every raw tool result itself to detect file
+attachments and pending approvals by their *shape* (see
+`_looks_like_attachment`/`_looks_like_pending_approval`), not by hardcoding
+one server's tool names - so a future MCP server (e.g. an ERP system) gets
+the same file-delivery and approval-gate handling automatically, as long as
+its tools return the same result shapes email-mcp-server's do.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from enum import Enum
 
 from anthropic import AsyncAnthropic
 
-from agent_hub.mcp_client import McpToolHub
+from agent_hub.mcp_client import McpToolHub, split_tool_name
 
 MAX_TOOL_ITERATIONS = 15  # defensive cap - a genuine conversation needs a handful, not 15
 
@@ -171,6 +174,35 @@ async def handle_message(
     return result, messages[-MAX_HISTORY_MESSAGES:]
 
 
+def _looks_like_attachment(data: object) -> bool:
+    """Structural check, not a tool-name check - any MCP server's tool (not
+    just email's `get_attachment`) gets file-delivery treatment as long as
+    its structured output matches this shape. Adding a new server (e.g. an
+    ERP system returning an invoice PDF) needs no change here."""
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("filename"), str)
+        and isinstance(data.get("content_type"), str)
+        and isinstance(data.get("content_base64"), str)
+    )
+
+
+def _looks_like_pending_approval(data: object) -> bool:
+    """Structural check, not a tool-name check (e.g. not hardcoded to
+    "request_send_approval") - any MCP server's approval-gated tool gets
+    picked up as long as it returns this shape (id + status=pending +
+    message), the same contract email-mcp-server's ApprovalRequestDTO
+    already uses. A future server (e.g. an ERP "book this invoice" action)
+    needs no change here, only to return the same shape - see
+    email-mcp-server's README, "Approving from a chat channel"."""
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("id"), str)
+        and data.get("status") == "pending"
+        and isinstance(data.get("message"), str)
+    )
+
+
 async def _run_tool(
     tool_hub: McpToolHub, block, attachments: list[Attachment], pending_approvals: list[PendingApproval]
 ) -> tuple[dict, Status]:
@@ -188,9 +220,10 @@ async def _run_tool(
         )
 
     result_text = "\n".join(c.text for c in result.content if c.type == "text")
+    data = result.structured_content
+    tool_status = Status.ERROR if result.is_error else Status.AUTONOMOUS
 
-    if block.name.endswith("__get_attachment") and result.structured_content:
-        data = result.structured_content
+    if not result.is_error and _looks_like_attachment(data):
         attachments.append(
             Attachment(
                 filename=data["filename"],
@@ -203,14 +236,12 @@ async def _run_tool(
         # otherwise re-read on every future turn too, via history). Claude
         # never needs the bytes - the file goes straight to the user above -
         # so replace it with a short confirmation instead of resending it.
-        result_text = f"Attachment {data['filename']!r} ({data['size_bytes']} bytes) retrieved and already delivered to the user directly - do not describe its contents unless asked."
+        result_text = f"Attachment {data['filename']!r} ({data.get('size_bytes', '?')} bytes) retrieved and already delivered to the user directly - do not describe its contents unless asked."
 
-    if block.name.endswith("__request_send_approval") and not result.is_error and result.structured_content:
-        server_name = block.name.rsplit("__request_send_approval", 1)[0]
-        data = result.structured_content
-        pending_approvals.append(
-            PendingApproval(server=server_name, approval_id=data["id"], message=data.get("message", ""))
-        )
+    elif not result.is_error and _looks_like_pending_approval(data):
+        server_name, _tool_name = split_tool_name(block.name)
+        pending_approvals.append(PendingApproval(server=server_name, approval_id=data["id"], message=data["message"]))
+        tool_status = Status.PENDING_APPROVAL
 
     tool_result = {
         "type": "tool_result",
@@ -218,12 +249,5 @@ async def _run_tool(
         "content": result_text or "(empty result)",
         "is_error": result.is_error,
     }
-
-    if result.is_error:
-        tool_status = Status.ERROR
-    elif block.name.endswith("__request_send_approval"):
-        tool_status = Status.PENDING_APPROVAL
-    else:
-        tool_status = Status.AUTONOMOUS
 
     return tool_result, tool_status
