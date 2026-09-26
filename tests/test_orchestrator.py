@@ -4,7 +4,14 @@ import base64
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from agent_hub.orchestrator import MAX_HISTORY_MESSAGES, MAX_TOOL_ITERATIONS, Status, handle_message
+from agent_hub import orchestrator as orchestrator_module
+from agent_hub.orchestrator import (
+    MAX_HISTORY_MESSAGES,
+    MAX_TOOL_ITERATIONS,
+    Status,
+    _trim_history,
+    handle_message,
+)
 
 # --- Fakes -------------------------------------------------------------
 
@@ -289,6 +296,53 @@ async def test_history_is_trimmed_to_max_history_messages() -> None:
     assert len(new_history) == MAX_HISTORY_MESSAGES
     # the trim keeps the most recent messages, not the oldest
     assert new_history[0]["content"] != "message 0"
+
+
+def _tool_result_message(tool_use_id: str) -> dict:
+    return {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": "ok", "is_error": False}],
+    }
+
+
+def test_trim_history_skips_past_a_cut_that_would_orphan_a_tool_result(monkeypatch) -> None:
+    # Regression test for a production incident (2026-09-21, 2026-09-23): a
+    # plain messages[-N:] slice landed between an assistant tool_use message
+    # and its matching user tool_result message, producing a history the API
+    # rejects outright (400: orphaned tool_result) - and since the broken,
+    # trimmed history is exactly what gets stored and resent on every future
+    # message for that chat, it stayed broken until the process restarted.
+    monkeypatch.setattr(orchestrator_module, "MAX_HISTORY_MESSAGES", 3)
+    messages = [
+        {"role": "user", "content": "turn 1"},
+        {"role": "assistant", "content": [tool_use_block("t1", "email__search_emails", {})]},
+        _tool_result_message("t1"),  # a naive messages[-3:] would start here - orphaned
+        {"role": "assistant", "content": [text_block("done with turn 1")]},
+        {"role": "user", "content": "turn 2"},
+    ]
+
+    trimmed = _trim_history(messages)
+
+    assert trimmed == [{"role": "user", "content": "turn 2"}]
+
+
+def test_trim_history_keeps_a_full_turn_even_if_it_alone_exceeds_the_cap(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator_module, "MAX_HISTORY_MESSAGES", 2)
+    messages = [
+        {"role": "user", "content": "turn 1"},
+        {"role": "user", "content": "turn 2"},
+        {"role": "assistant", "content": [tool_use_block("t1", "email__search_emails", {})]},
+        _tool_result_message("t1"),
+        {"role": "assistant", "content": [tool_use_block("t2", "email__get_email", {})]},
+        _tool_result_message("t2"),
+        {"role": "assistant", "content": [text_block("done with turn 2")]},
+    ]
+
+    trimmed = _trim_history(messages)
+
+    # Longer than the cap, but a complete, valid turn - never a corrupt one.
+    assert trimmed[0] == {"role": "user", "content": "turn 2"}
+    assert trimmed == messages[1:]
 
 
 async def test_effort_defaults_to_low_and_is_sent_as_output_config() -> None:

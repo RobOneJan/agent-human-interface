@@ -151,7 +151,7 @@ async def handle_message(
             result = OrchestratorResult(
                 text=final_text, status=status, attachments=attachments, pending_approvals=pending_approvals
             )
-            return result, messages[-MAX_HISTORY_MESSAGES:]
+            return result, _trim_history(messages)
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -171,7 +171,32 @@ async def handle_message(
         attachments=attachments,
         pending_approvals=pending_approvals,
     )
-    return result, messages[-MAX_HISTORY_MESSAGES:]
+    return result, _trim_history(messages)
+
+
+def _trim_history(messages: list[dict]) -> list[dict]:
+    """Trim to (approximately) the most recent MAX_HISTORY_MESSAGES entries,
+    but ONLY ever cut at a turn boundary - a fresh user text message, never
+    a `{"role": "user", "content": [...tool_result...]}` message.
+
+    A plain `messages[-MAX_HISTORY_MESSAGES:]` slice can land inside a
+    multi-tool-call turn, between an assistant `tool_use` message and its
+    matching user `tool_result` message. That produces a history starting
+    with an orphaned tool_result, which the API rejects outright (400:
+    "unexpected tool_use_id ... no corresponding tool_use block") - and
+    since the trimmed (broken) history is what gets stored and resent on
+    every subsequent message for that chat, it stays broken until the
+    process restarts and the in-memory history is lost. This happened in
+    production (2026-09-21, 2026-09-23) before this fix existed.
+    """
+    if len(messages) <= MAX_HISTORY_MESSAGES:
+        return messages
+    turn_starts = [
+        i for i, m in enumerate(messages) if m.get("role") == "user" and isinstance(m.get("content"), str)
+    ]
+    min_cut = len(messages) - MAX_HISTORY_MESSAGES
+    cut = next((i for i in turn_starts if i >= min_cut), turn_starts[-1])
+    return messages[cut:]
 
 
 def _looks_like_attachment(data: object) -> bool:
