@@ -36,12 +36,12 @@ _STATUS_EMOJI = {
 
 _CALLBACK_SEP = ":"
 
-# A "longer action" (per the user's own ask, ahead of scheduled/ERP work
-# where cost will matter more) is any turn that made at least one tool call -
-# a plain conversational reply without tools stays quiet. Cheap to retune
-# later; not worth a config knob yet (see orchestrator.MAX_HISTORY_MESSAGES
-# for the same reasoning on a similar constant).
-MIN_TOOL_CALLS_FOR_COST_REPORT = 1
+# 0 = report on every reply, including a plain conversational one with no
+# tool calls - deliberately simple for now (explicit choice, not yet tuned):
+# ahead of scheduled/ERP work where cost matters more, blanket visibility
+# beats guessing at a "longer action" threshold. Raise this later if
+# per-message cost lines turn out to be more noise than signal.
+MIN_TOOL_CALLS_FOR_COST_REPORT = 0
 
 
 def format_reply(result: OrchestratorResult) -> str:
@@ -51,10 +51,10 @@ def format_reply(result: OrchestratorResult) -> str:
 
 def format_cost_line(result: OrchestratorResult) -> str | None:
     """A short, separate follow-up message with this turn's approximate
-    cost - None when there's nothing worth reporting (see
-    MIN_TOOL_CALLS_FOR_COST_REPORT) or when the configured model isn't in
-    pricing.py's table (cost_usd is None there means "unknown", never "free" -
-    reporting nothing is correct, reporting 0.00ct would be a lie). In cents,
+    cost, sent after every reply (see MIN_TOOL_CALLS_FOR_COST_REPORT) -
+    None only when the configured model isn't in pricing.py's table
+    (cost_usd is None there means "unknown", never "free" - reporting
+    nothing is correct, reporting 0.00ct would be a lie). In cents,
     not dollars - a single reply's cost is normally well under $0.01, and
     "0.34ct" reads better than "$0.0034". "Robert" (not the tenant) always
     pays: every tenant's usage is billed to the same Anthropic account, on

@@ -61,9 +61,11 @@ def test_format_cost_line_reports_for_a_single_call_too() -> None:
     assert format_cost_line(result) == "Robert zahlt: 0.10ct"
 
 
-def test_format_cost_line_is_none_without_any_tool_calls() -> None:
+def test_format_cost_line_reports_even_without_any_tool_calls() -> None:
+    # For now cost is reported on every reply, including a plain
+    # conversational one - see MIN_TOOL_CALLS_FOR_COST_REPORT.
     result = OrchestratorResult(text="hi", tool_call_count=0, cost_usd=0.001)
-    assert format_cost_line(result) is None
+    assert format_cost_line(result) == "Robert zahlt: 0.10ct"
 
 
 def test_format_cost_line_is_none_when_cost_is_unknown() -> None:

@@ -76,10 +76,11 @@ on the target Cloud Run service, same as for `/mcp` itself.
 
 ## Cost
 
-**Per-message cost reporting.** After any reply that made at least one tool
-call (`telegram_bot.MIN_TOOL_CALLS_FOR_COST_REPORT`, currently 1 - a plain
-conversational reply without tools stays quiet), the bot sends a short
-follow-up message like `Robert zahlt: 0.34ct` - in cents, not dollars (a
+**Per-message cost reporting.** After every reply
+(`telegram_bot.MIN_TOOL_CALLS_FOR_COST_REPORT`, currently 0 - deliberately
+simple for now, blanket visibility ahead of scheduled/ERP work rather than a
+tuned "longer action" threshold), the bot sends a short follow-up message
+like `Robert zahlt: 0.34ct` - in cents, not dollars (a
 single reply's cost is normally well under a cent). "Robert" is this bot's
 owner, not the tenant - every tenant's usage is billed to the same
 Anthropic account regardless of which chat triggered it, so the message is
