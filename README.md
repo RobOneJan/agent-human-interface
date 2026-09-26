@@ -79,7 +79,11 @@ on the target Cloud Run service, same as for `/mcp` itself.
 **Per-message cost reporting.** After any reply that made at least one tool
 call (`telegram_bot.MIN_TOOL_CALLS_FOR_COST_REPORT`, currently 1 - a plain
 conversational reply without tools stays quiet), the bot sends a short
-follow-up message like `💰 ~$0.0031 (2 tool calls)`. The estimate is computed
+follow-up message like `Robert zahlt: 0.34ct` - in cents, not dollars (a
+single reply's cost is normally well under a cent). "Robert" is this bot's
+owner, not the tenant - every tenant's usage is billed to the same
+Anthropic account regardless of which chat triggered it, so the message is
+accurate for any chat, not just the owner's own. The estimate is computed
 from `response.usage` on every `claude.messages.create()` call that turn
 (see `pricing.py`'s per-token rates for the configured `CLAUDE_MODEL`,
 checked against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)

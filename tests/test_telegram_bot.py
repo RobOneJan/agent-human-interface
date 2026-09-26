@@ -52,13 +52,13 @@ def test_approval_keyboard_has_approve_and_reject_buttons_with_matching_callback
 
 
 def test_format_cost_line_reports_when_tools_were_used() -> None:
-    result = OrchestratorResult(text="ok", tool_call_count=2, cost_usd=0.0031)
-    assert format_cost_line(result) == "\U0001f4b0 ~$0.0031 (2 tool calls)"
+    result = OrchestratorResult(text="ok", tool_call_count=2, cost_usd=0.0034)
+    assert format_cost_line(result) == "Robert zahlt: 0.34ct"
 
 
-def test_format_cost_line_uses_singular_for_one_call() -> None:
+def test_format_cost_line_reports_for_a_single_call_too() -> None:
     result = OrchestratorResult(text="ok", tool_call_count=1, cost_usd=0.001)
-    assert format_cost_line(result) == "\U0001f4b0 ~$0.0010 (1 tool call)"
+    assert format_cost_line(result) == "Robert zahlt: 0.10ct"
 
 
 def test_format_cost_line_is_none_without_any_tool_calls() -> None:

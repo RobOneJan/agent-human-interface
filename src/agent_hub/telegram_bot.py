@@ -54,11 +54,15 @@ def format_cost_line(result: OrchestratorResult) -> str | None:
     cost - None when there's nothing worth reporting (see
     MIN_TOOL_CALLS_FOR_COST_REPORT) or when the configured model isn't in
     pricing.py's table (cost_usd is None there means "unknown", never "free" -
-    reporting nothing is correct, reporting $0.00 would be a lie)."""
+    reporting nothing is correct, reporting 0.00ct would be a lie). In cents,
+    not dollars - a single reply's cost is normally well under $0.01, and
+    "0.34ct" reads better than "$0.0034". "Robert" (not the tenant) always
+    pays: every tenant's usage is billed to the same Anthropic account, on
+    this bot's owner's card, whichever chat/tenant triggered it - see
+    README's "Cost"."""
     if result.tool_call_count < MIN_TOOL_CALLS_FOR_COST_REPORT or result.cost_usd is None:
         return None
-    calls = "call" if result.tool_call_count == 1 else "calls"
-    return f"\U0001f4b0 ~${result.cost_usd:.4f} ({result.tool_call_count} tool {calls})"
+    return f"Robert zahlt: {result.cost_usd * 100:.2f}ct"
 
 
 def approval_callback_data(action: str, server: str, approval_id: str) -> str:
