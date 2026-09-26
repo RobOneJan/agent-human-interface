@@ -36,10 +36,29 @@ _STATUS_EMOJI = {
 
 _CALLBACK_SEP = ":"
 
+# A "longer action" (per the user's own ask, ahead of scheduled/ERP work
+# where cost will matter more) is any turn that made at least one tool call -
+# a plain conversational reply without tools stays quiet. Cheap to retune
+# later; not worth a config knob yet (see orchestrator.MAX_HISTORY_MESSAGES
+# for the same reasoning on a similar constant).
+MIN_TOOL_CALLS_FOR_COST_REPORT = 1
+
 
 def format_reply(result: OrchestratorResult) -> str:
     emoji = _STATUS_EMOJI[result.status]
     return f"{emoji} {result.text}" if result.text else emoji
+
+
+def format_cost_line(result: OrchestratorResult) -> str | None:
+    """A short, separate follow-up message with this turn's approximate
+    cost - None when there's nothing worth reporting (see
+    MIN_TOOL_CALLS_FOR_COST_REPORT) or when the configured model isn't in
+    pricing.py's table (cost_usd is None there means "unknown", never "free" -
+    reporting nothing is correct, reporting $0.00 would be a lie)."""
+    if result.tool_call_count < MIN_TOOL_CALLS_FOR_COST_REPORT or result.cost_usd is None:
+        return None
+    calls = "call" if result.tool_call_count == 1 else "calls"
+    return f"\U0001f4b0 ~${result.cost_usd:.4f} ({result.tool_call_count} tool {calls})"
 
 
 def approval_callback_data(action: str, server: str, approval_id: str) -> str:
@@ -115,6 +134,9 @@ def build_application(settings: Settings) -> Application:
                 f"{_STATUS_EMOJI[Status.PENDING_APPROVAL]} {pending.message}",
                 reply_markup=approval_keyboard(pending),
             )
+        cost_line = format_cost_line(result)
+        if cost_line is not None:
+            await message.reply_text(cost_line)
 
     async def on_approval_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query

@@ -20,6 +20,7 @@ from enum import Enum
 from anthropic import AsyncAnthropic
 
 from agent_hub.mcp_client import McpToolHub, split_tool_name
+from agent_hub.pricing import estimate_cost_usd
 
 MAX_TOOL_ITERATIONS = 15  # defensive cap - a genuine conversation needs a handful, not 15
 
@@ -97,6 +98,12 @@ class OrchestratorResult:
     status: Status = Status.AUTONOMOUS
     attachments: list[Attachment] = field(default_factory=list)
     pending_approvals: list[PendingApproval] = field(default_factory=list)
+    # Summed across every claude.messages.create() call this turn made (a
+    # multi-tool-call turn calls it more than once). None means the
+    # configured model isn't in pricing.py's table, not "free" - a channel
+    # adapter must not report $0.00 in that case, see telegram_bot.py.
+    cost_usd: float | None = None
+    tool_call_count: int = 0
 
 
 MAX_HISTORY_MESSAGES = 20  # ~10 turns of context; trimmed from the oldest end after each reply
@@ -127,6 +134,10 @@ async def handle_message(
     attachments: list[Attachment] = []
     pending_approvals: list[PendingApproval] = []
     status = Status.AUTONOMOUS
+    tool_call_count = 0
+    # None means "unknown", not "free" - one call on an unpriced model makes
+    # the whole turn's cost unknown, since a partial sum would understate it.
+    cost_usd: float | None = 0.0
 
     for _ in range(MAX_TOOL_ITERATIONS):
         # tools/messages: schemas and history are built at runtime, not statically
@@ -144,12 +155,20 @@ async def handle_message(
             cache_control={"type": "ephemeral", "ttl": "1h"},
             output_config={"effort": effort},
         )
+        if cost_usd is not None:
+            call_cost = estimate_cost_usd(model, response.usage)
+            cost_usd = None if call_cost is None else cost_usd + call_cost
 
         if response.stop_reason != "tool_use":
             final_text = next((b.text for b in response.content if b.type == "text"), "")
             messages.append({"role": "assistant", "content": response.content})
             result = OrchestratorResult(
-                text=final_text, status=status, attachments=attachments, pending_approvals=pending_approvals
+                text=final_text,
+                status=status,
+                attachments=attachments,
+                pending_approvals=pending_approvals,
+                cost_usd=cost_usd,
+                tool_call_count=tool_call_count,
             )
             return result, _trim_history(messages)
 
@@ -162,6 +181,7 @@ async def handle_message(
             tool_result, tool_status = await _run_tool(tool_hub, block, attachments, pending_approvals)
             tool_results.append(tool_result)
             status = _combine(status, tool_status)
+            tool_call_count += 1
 
         messages.append({"role": "user", "content": tool_results})
 
@@ -170,6 +190,8 @@ async def handle_message(
         status=Status.ERROR,
         attachments=attachments,
         pending_approvals=pending_approvals,
+        cost_usd=cost_usd,
+        tool_call_count=tool_call_count,
     )
     return result, _trim_history(messages)
 

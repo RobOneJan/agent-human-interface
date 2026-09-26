@@ -47,6 +47,9 @@ Add-on     --adapter-->
   or `.../reject` HTTP route directly (see below). Deliberately separate
   from `mcp_client.py`/`orchestrator.py`: it is never reachable from the
   tool-use loop, only from a human-triggered Telegram button.
+- **`pricing.py`** - per-token USD rates for each supported `CLAUDE_MODEL`,
+  used to turn a Claude API response's `usage` into an approximate cost -
+  see "Cost" below.
 
 ## Approving from Telegram
 
@@ -72,6 +75,21 @@ that MCP server - the calling identity (your `gcloud` login locally, or
 on the target Cloud Run service, same as for `/mcp` itself.
 
 ## Cost
+
+**Per-message cost reporting.** After any reply that made at least one tool
+call (`telegram_bot.MIN_TOOL_CALLS_FOR_COST_REPORT`, currently 1 - a plain
+conversational reply without tools stays quiet), the bot sends a short
+follow-up message like `💰 ~$0.0031 (2 tool calls)`. The estimate is computed
+from `response.usage` on every `claude.messages.create()` call that turn
+(see `pricing.py`'s per-token rates for the configured `CLAUDE_MODEL`,
+checked against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+on 2026-09-26) - it is an approximation, not a substitute for the Claude
+Console's own usage/billing numbers. **Switching `CLAUDE_MODEL` to a model
+not in `pricing.py`'s table silently stops cost reporting** (no tool-call
+turn will show a cost line) rather than showing a wrong number - add the
+new model's rates there when you switch. This exists ahead of the
+scheduled/ERP-integration work below, where autonomous runs make cost
+visibility matter more than it does for a manually-triggered chat reply.
 
 No eval exists in this project, so there is no automated way to tell a real
 saving from a quality regression - these levers were applied on an explicit

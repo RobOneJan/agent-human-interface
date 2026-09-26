@@ -4,6 +4,8 @@ import base64
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from agent_hub import orchestrator as orchestrator_module
 from agent_hub.orchestrator import (
     MAX_HISTORY_MESSAGES,
@@ -28,6 +30,23 @@ def tool_use_block(tool_id: str, name: str, input_: dict):
 class FakeResponse:
     stop_reason: str
     content: list
+    usage: object = None  # None -> estimate_cost_usd treats it as "unknown", see pricing.py
+
+
+def fake_usage(
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+    cache_creation: object | None = None,
+):
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        cache_creation=cache_creation,
+    )
 
 
 class FakeMessages:
@@ -433,3 +452,56 @@ async def test_attachment_detection_works_for_a_differently_named_tool() -> None
     assert len(result.attachments) == 1
     assert result.attachments[0].filename == "invoice.pdf"
     assert result.attachments[0].data == raw_bytes
+
+
+async def test_cost_and_tool_call_count_are_summed_across_the_turn() -> None:
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t1", "email__search_emails", {"query": "x"})],
+                usage=fake_usage(input_tokens=1_000, output_tokens=100),
+            ),
+            FakeResponse(
+                stop_reason="end_turn",
+                content=[text_block("done")],
+                usage=fake_usage(input_tokens=500, output_tokens=50),
+            ),
+        ]
+    )
+    hub = FakeToolHub({"email__search_emails": FakeToolResult(content=[SimpleNamespace(type="text", text="ok")])})
+
+    result, _history = await handle_message("find x", hub, claude, "claude-sonnet-5")
+
+    assert result.tool_call_count == 1
+    expected = (1_000 + 500) * (2.00 / 1_000_000) + (100 + 50) * (10.00 / 1_000_000)
+    assert result.cost_usd == pytest.approx(expected)
+
+
+async def test_a_no_tool_call_turn_has_zero_tool_calls_but_known_cost() -> None:
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="end_turn",
+                content=[text_block("hi")],
+                usage=fake_usage(input_tokens=100, output_tokens=10),
+            )
+        ]
+    )
+    hub = FakeToolHub()
+
+    result, _history = await handle_message("hello", hub, claude, "claude-sonnet-5")
+
+    assert result.tool_call_count == 0
+    assert result.cost_usd == pytest.approx(100 * (2.00 / 1_000_000) + 10 * (10.00 / 1_000_000))
+
+
+async def test_cost_is_none_for_an_unpriced_model() -> None:
+    claude = FakeClaude(
+        [FakeResponse(stop_reason="end_turn", content=[text_block("hi")], usage=fake_usage(input_tokens=10))]
+    )
+    hub = FakeToolHub()
+
+    result, _history = await handle_message("hello", hub, claude, "some-future-model")
+
+    assert result.cost_usd is None
