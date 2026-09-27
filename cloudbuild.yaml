@@ -1,19 +1,31 @@
 # Cloud Build CI/CD: build the image, push it to Artifact Registry, deploy to
-# Cloud Run. Mirrors email-mcp-server's cloudbuild.yaml, with two differences
-# that matter for a long-polling worker instead of a request-driven service:
-# --no-cpu-throttling (this process does real work with no inbound HTTP
-# requests to trigger CPU allocation - without this flag Cloud Run starves it
-# between health-check hits) and --max-instances=1 pinned together with
-# --min-instances=1 (Telegram's long-polling API allows only one active
-# poller per bot token; two instances would fight and both would fail with
-# 409 Conflict).
+# Cloud Run. Mirrors email-mcp-server's cloudbuild.yaml.
+#
+# --max-instances=1 stays pinned regardless of channel: chat_history and
+# _graph_ready (teams_bot.py) are in-memory, keyed per conversation/tenant,
+# with no cross-instance sharing - two instances would each answer with only
+# half the context. --min-instances=1/--no-cpu-throttling were originally
+# about Telegram's long-polling loop needing to run continuously with no
+# inbound HTTP to trigger CPU allocation; kept as-is under Teams too (a
+# webhook), where they now just mean "always warm, no cold start on the
+# first Teams message" - fine for a low-traffic internal bot, revisit if
+# cost ever matters more than latency here.
 substitutions:
   _REGION: europe-west3
   _REPO: agent-hub
   _SERVICE: agent-hub
-  # Comma-separated Telegram chat ids allowed to use the bot. Set as a
-  # trigger-level substitution once known - see README "Deploying".
+  # Comma-separated Telegram chat ids allowed to use the bot - unused while
+  # main.py runs teams_bot.py instead of telegram_bot.py, kept for a future
+  # revert. Set as a trigger-level substitution - see README "Deploying".
   _TELEGRAM_ALLOWED_CHAT_IDS: ""
+  # Same Azure AD app registration as email-mcp-server's
+  # GRAPH_CLIENT_ID/GRAPH_TENANT_ID (see that repo's .env.example) - this app
+  # doubles as both the Bot's own identity and the Graph on-behalf-of
+  # client. Not secret; set as trigger-level substitutions - see README's
+  # Azure setup steps. TEAMS_APP_PASSWORD (the client secret) is a Secret
+  # Manager secret instead, see the deploy step below.
+  _TEAMS_APP_ID: ""
+  _TEAMS_APP_TENANT_ID: ""
 
 steps:
   - id: build
@@ -43,16 +55,24 @@ steps:
       - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
       - --region=${_REGION}
       - --platform=managed
-      # Not publicly reachable - and doesn't need to be: nothing calls this
-      # service over HTTP. The port only exists for Cloud Run's own health
-      # probe.
-      - --no-allow-unauthenticated
+      # Publicly reachable now: Microsoft's Bot Framework Connector calls
+      # this service's POST /api/messages from outside GCP to deliver every
+      # Teams message, and it has no Google-signed identity for Cloud Run's
+      # own IAM layer to check - so that layer must let every request
+      # through. The real security boundary is the Bot Framework JWT check
+      # CloudAdapter itself performs on every request before any bot code
+      # runs (verified locally: an unsigned request gets a 401 straight from
+      # the app) - see teams_bot.py's module docstring.
+      - --allow-unauthenticated
       - --min-instances=1
       - --max-instances=1
       - --no-cpu-throttling
       - --service-account=agent-hub-run@$PROJECT_ID.iam.gserviceaccount.com
-      - --set-secrets=TELEGRAM_BOT_TOKEN=agent-hub-telegram-bot-token:latest,ANTHROPIC_API_KEY=agent-hub-anthropic-api-key:latest
-      - --update-env-vars=MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}
+      - --set-secrets=TELEGRAM_BOT_TOKEN=agent-hub-telegram-bot-token:latest,ANTHROPIC_API_KEY=agent-hub-anthropic-api-key:latest,TEAMS_APP_PASSWORD=agent-hub-teams-app-password:latest
+      # ^@^ switches the pair-separator from "," to "@" for this whole flag,
+      # since MCP_SERVERS' own value needs a literal "," between servers -
+      # see terbox-erp-mcp's own note on this exact gcloud footgun.
+      - --update-env-vars=^@^MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,terbox=https://terbox-erp-mcp-pdzqlk5ioq-ey.a.run.app/mcp@TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}@TEAMS_APP_ID=${_TEAMS_APP_ID}@TEAMS_APP_TENANT_ID=${_TEAMS_APP_TENANT_ID}
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID

@@ -19,26 +19,35 @@ DEFAULT_TENANT_ID = "default"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    telegram_bot_token: str
+    # Optional now that Teams (see teams_bot.py) is the primary channel -
+    # telegram_bot.py is still importable, just not run by default (see
+    # main.py). Left required=False rather than removed so a future redeploy
+    # that reinstates it needs no Settings change.
+    telegram_bot_token: str | None = None
+    # Comma-separated Telegram chat ids allowed to talk to this bot, each
+    # optionally mapped to a tenant_id: "<chat_id>" or "<chat_id>=<tenant_id>".
+    # See parsed_chat_tenants(). Empty by default now that Telegram isn't run.
+    telegram_allowed_chat_ids: str = ""
 
-    # Only used to satisfy Cloud Run's health-check port when hosted - this
-    # process is a long-polling worker, not an HTTP service; nothing else
-    # should ever call it. See main.py.
+    # Real HTTP port under Teams (teams_bot.py's aiohttp app listens here);
+    # was only a health-check placeholder under Telegram's long-polling
+    # model. See main.py.
     port: int = Field(default=8080, gt=0)
+
+    # Microsoft Teams / Bot Framework (see teams_bot.py). Same Azure AD app
+    # registration as email-mcp-server's GRAPH_CLIENT_ID/SECRET/TENANT_ID -
+    # this app doubles as both the Bot's own identity and the Graph
+    # on-behalf-of client - configured here independently since this is a
+    # separate deployment. See README's Azure setup steps.
+    teams_app_id: str | None = None
+    teams_app_password: str | None = None
+    teams_app_tenant_id: str | None = None
 
     # "<name>=<url>,<name>=<url>,..." - one entry per MCP server this agent can
     # use as tools. Tool names are exposed to Claude as "<name>__<tool>" so two
     # servers can never collide. Start with just email; add erp=<url> etc. later
     # without touching orchestrator.py.
     mcp_servers: str
-
-    # Comma-separated Telegram chat ids allowed to talk to this bot, each
-    # optionally mapped to a tenant_id (which mailbox it reaches, on the email
-    # MCP server side): "<chat_id>" or "<chat_id>=<tenant_id>". A bare chat_id
-    # maps to tenant "default" (this bot's original single mailbox) - fully
-    # backward compatible with a plain comma-separated id list. Anyone not on
-    # this list is ignored - there is no self-serve signup flow (see README).
-    telegram_allowed_chat_ids: str
 
     # Stepped down from claude-opus-5 for cost - see README "Cost". Override
     # via env if quality doesn't hold up for your traffic.
