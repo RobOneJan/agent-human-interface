@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 
 from aiohttp import web
 from anthropic import AsyncAnthropic
@@ -143,6 +144,12 @@ async def _bootstrap_graph(mcp_servers: dict[str, str], tenant_id: str, user_ass
             json={"tenant_id": tenant_id, "user_assertion": user_assertion},
             headers=headers,
         )
+    if response.status_code >= 400:
+        # email-mcp-server's own JSONResponse body has the real reason (e.g.
+        # the MSAL error_description) - raise_for_status() alone discards it.
+        logger.error(
+            "graph bootstrap call failed: status=%s body=%s", response.status_code, response.text
+        )
     response.raise_for_status()
 
 
@@ -179,8 +186,18 @@ class TeamsBot(TeamsActivityHandler):
         if not text:
             return
 
+        if text.strip().lower() in ("logout", "abmelden"):
+            await self._sign_out(turn_context, tenant_id)
+            return
+
         if tenant_id not in self._graph_ready:
-            ready = await self._ensure_graph_bootstrap(turn_context, tenant_id)
+            # If the user is typing back the magic code from the sign-in
+            # popup (see _ensure_graph_bootstrap), forward it to the Token
+            # Service so it can complete the exchange - without this, a typed
+            # code was silently ignored and the bot just re-sent the same
+            # sign-in card forever.
+            magic_code = text.strip() if re.fullmatch(r"\d{4,8}", text.strip()) else None
+            ready = await self._ensure_graph_bootstrap(turn_context, tenant_id, magic_code)
             if not ready:
                 return  # sign-in card already sent; wait for the user to complete it and message again
 
@@ -214,7 +231,9 @@ class TeamsBot(TeamsActivityHandler):
         if cost_line is not None:
             await turn_context.send_activity(cost_line)
 
-    async def _ensure_graph_bootstrap(self, turn_context: TurnContext, tenant_id: str) -> bool:
+    async def _ensure_graph_bootstrap(
+        self, turn_context: TurnContext, tenant_id: str, magic_code: str | None = None
+    ) -> bool:
         user_token_client: UserTokenClient | None = turn_context.turn_state.get(UserTokenClient.__name__)
         if user_token_client is None:
             logger.error("no UserTokenClient in turn_state - adapter/auth misconfigured")
@@ -225,7 +244,7 @@ class TeamsBot(TeamsActivityHandler):
             turn_context.activity.from_property.id,
             _CONNECTION_NAME,
             turn_context.activity.channel_id,
-            None,
+            magic_code,
         )
         if token_response and token_response.token:
             try:
@@ -248,8 +267,34 @@ class TeamsBot(TeamsActivityHandler):
             ],
             token_exchange_resource=sign_in_resource.token_exchange_resource,
         )
+        # Plain-text fallback alongside the OAuthCard: some Teams surfaces
+        # (older desktop builds, some mobile clients) silently drop an
+        # unrenderable OAuthCard attachment with no error back to the bot -
+        # the text line guarantees the user sees *something* and can still
+        # reach the sign-in link even if the card itself never appears.
+        await turn_context.send_activity(
+            f"🔑 Melde dich an, um dein Postfach zu verbinden: {sign_in_resource.sign_in_link}"
+        )
         await turn_context.send_activity(Activity(attachments=[CardFactory.oauth_card(card)]))
         return False
+
+    async def _sign_out(self, turn_context: TurnContext, tenant_id: str) -> None:
+        """Clear the Bot Framework Token Service's cached token for this
+        user+connection (typed "logout"/"abmelden") - the next sign-in is
+        then guaranteed fresh, not served from cache. Useful whenever the
+        Azure AD app registration's config (e.g. the Application ID URI)
+        changes after a user already completed the SSO bootstrap once."""
+        user_token_client: UserTokenClient | None = turn_context.turn_state.get(UserTokenClient.__name__)
+        if user_token_client is None:
+            await turn_context.send_activity("Sign-in isn't configured correctly on this bot yet.")
+            return
+        await user_token_client.sign_out_user(
+            turn_context.activity.from_property.id,
+            _CONNECTION_NAME,
+            turn_context.activity.channel_id,
+        )
+        self._graph_ready.discard(tenant_id)
+        await turn_context.send_activity("🔓 Abgemeldet. Schick eine neue Nachricht für einen frischen Sign-in.")
 
     async def _handle_approval_callback(self, turn_context: TurnContext, tenant_id: str, value: dict) -> None:
         action = value.get("action")
