@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # model. See main.py.
     port: int = Field(default=8080, gt=0)
 
+    # This service's own public HTTPS origin (e.g. the Cloud Run URL), no
+    # trailing slash. Needed only for Teams file delivery (teams_bot.py's
+    # attachment-hosting route) to build an absolute content_url Teams can
+    # fetch - Bot Framework attachments need a real URL, not a data: URI
+    # (Teams silently drops those, see teams_bot.py's own note).
+    public_base_url: str | None = None
+
     # Microsoft Teams / Bot Framework (see teams_bot.py). Same Azure AD app
     # registration as email-mcp-server's GRAPH_CLIENT_ID/SECRET/TENANT_ID -
     # this app doubles as both the Bot's own identity and the Graph

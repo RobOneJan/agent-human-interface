@@ -32,16 +32,17 @@ Teams SSO flow, in order:
 
 from __future__ import annotations
 
-import base64
 import logging
 import re
+import secrets
+import time
 
 from aiohttp import web
 from anthropic import AsyncAnthropic
 from botbuilder.core import CardFactory, MemoryStorage, TurnContext
 from botbuilder.core.teams import TeamsActivityHandler, TeamsSSOTokenExchangeMiddleware
 from botbuilder.integration.aiohttp import CloudAdapter, ConfigurationBotFrameworkAuthentication
-from botbuilder.schema import Activity, ActionTypes, Attachment as BotAttachment, CardAction, HeroCard, OAuthCard
+from botbuilder.schema import Activity, ActionTypes, Attachment as BotAttachment, CardAction, OAuthCard
 from botframework.connector.auth.user_token_client import UserTokenClient
 
 import httpx2
@@ -88,34 +89,76 @@ def _approval_value(action: str, server: str, approval_id: str) -> dict:
 
 
 def approval_card(pending: PendingApproval) -> BotAttachment:
-    card = HeroCard(
-        text=pending.message,
-        buttons=[
-            CardAction(
-                type=ActionTypes.message_back,
-                title="✅ Freigeben",
-                display_text="✅ Freigegeben",
-                value=_approval_value("approve", pending.server, pending.approval_id),
-            ),
-            CardAction(
-                type=ActionTypes.message_back,
-                title="❌ Ablehnen",
-                display_text="❌ Abgelehnt",
-                value=_approval_value("reject", pending.server, pending.approval_id),
-            ),
+    """Adaptive Card, not a HeroCard: every `payload` field (e.g. an email's
+    to/cc/subject/body_preview, or every field of a SevDesk create) renders as
+    an editable Input.Text, pre-filled with the server's original value - a
+    human can correct something (a typo'd address, a wrong price) right here
+    before approving. Editing is optional: tapping Freigeben unchanged just
+    resubmits the original values. Structural like the rest of the approval
+    plumbing - whatever keys a server's `payload` has are what shows up here,
+    nothing hardcoded to one server's field names. Edited values arrive back
+    in the same Action.Submit `data` dict (Adaptive Cards merge input values
+    into the submitted payload automatically) - see
+    `TeamsBot._handle_approval_callback`."""
+    body: list[dict] = [{"type": "TextBlock", "text": pending.message, "wrap": True}]
+    for key, value in pending.payload.items():
+        label = key.replace("_", " ").strip().capitalize()
+        body.append({"type": "TextBlock", "text": label, "weight": "bolder", "size": "small", "spacing": "medium"})
+        body.append({"type": "Input.Text", "id": key, "value": value, "isMultiline": len(value) > 80})
+    card = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": body,
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "✅ Freigeben",
+                "data": _approval_value("approve", pending.server, pending.approval_id),
+            },
+            {
+                "type": "Action.Submit",
+                "title": "❌ Ablehnen",
+                "data": _approval_value("reject", pending.server, pending.approval_id),
+            },
         ],
-    )
-    return CardFactory.hero_card(card)
+    }
+    return CardFactory.adaptive_card(card)
 
 
-def _file_attachment(attachment: Attachment) -> BotAttachment:
-    # Inline data-URI attachment - works for small files (see
-    # security.MAX_ATTACHMENT_SIZE_BYTES on the email-mcp-server side) without
-    # the OAuth-consent-heavy "file consent card" flow Teams otherwise wants
-    # for bot-to-user file delivery via OneDrive/SharePoint. Untested against
-    # a real Teams client as of this writing - see README's known gaps.
-    data_uri = f"data:{attachment.content_type};base64,{base64.b64encode(attachment.data).decode('ascii')}"
-    return BotAttachment(name=attachment.filename, content_type=attachment.content_type, content_url=data_uri)
+class _AttachmentStore:
+    """In-memory token -> bytes map so Teams file delivery can use a real
+    HTTPS content_url instead of a data: URI, which Teams silently drops (no
+    error back to the bot - just never renders, see README's known gaps
+    before this fix). Matches this process's existing single-instance
+    assumption (--max-instances=1, same as `_chat_history`/`_graph_ready`).
+    A short TTL is enough: the only reader is the same Teams conversation the
+    file was just delivered to, within seconds of the attachment message."""
+
+    def __init__(self, ttl_seconds: float = 3600.0) -> None:
+        self._ttl = ttl_seconds
+        self._items: dict[str, tuple[bytes, str, str, float]] = {}
+
+    def put(self, data: bytes, content_type: str, filename: str) -> str:
+        self._gc()
+        token = secrets.token_urlsafe(24)
+        self._items[token] = (data, content_type, filename, time.monotonic() + self._ttl)
+        return token
+
+    def get(self, token: str) -> tuple[bytes, str, str] | None:
+        item = self._items.get(token)
+        if item is None:
+            return None
+        data, content_type, filename, expiry = item
+        if time.monotonic() > expiry:
+            del self._items[token]
+            return None
+        return data, content_type, filename
+
+    def _gc(self) -> None:
+        now = time.monotonic()
+        for token in [t for t, item in self._items.items() if item[3] < now]:
+            del self._items[token]
 
 
 def _tenant_id_of(turn_context: TurnContext) -> str | None:
@@ -183,9 +226,12 @@ async def _bootstrap_graph(mcp_servers: dict[str, str], tenant_id: str, user_ass
 
 
 class TeamsBot(TeamsActivityHandler):
-    def __init__(self, settings: Settings, mcp_servers: dict[str, str]) -> None:
+    def __init__(
+        self, settings: Settings, mcp_servers: dict[str, str], attachment_store: "_AttachmentStore"
+    ) -> None:
         self._settings = settings
         self._mcp_servers = mcp_servers
+        self._attachment_store = attachment_store
         self._claude = AsyncAnthropic()
         # In-memory only, keyed by tenant_id - same reasoning as
         # telegram_bot.py's chat_history: this process is a singleton (see
@@ -246,9 +292,12 @@ class TeamsBot(TeamsActivityHandler):
             await turn_context.send_activity("Sorry, something went wrong answering that. Try again shortly.")
             return
 
+        await self._send_result(turn_context, result)
+
+    async def _send_result(self, turn_context: TurnContext, result: OrchestratorResult) -> None:
         await turn_context.send_activity(format_reply(result))
         for attachment in result.attachments:
-            await turn_context.send_activity(Activity(attachments=[_file_attachment(attachment)]))
+            await turn_context.send_activity(Activity(attachments=[self._file_attachment(attachment)]))
         for pending in result.pending_approvals:
             await turn_context.send_activity(
                 Activity(
@@ -259,6 +308,50 @@ class TeamsBot(TeamsActivityHandler):
         cost_line = format_cost_line(result)
         if cost_line is not None:
             await turn_context.send_activity(cost_line)
+
+    def _file_attachment(self, attachment: Attachment) -> BotAttachment:
+        base_url = self._settings.public_base_url
+        if not base_url:
+            logger.error("PUBLIC_BASE_URL is not configured - cannot deliver %r to Teams", attachment.filename)
+            return BotAttachment(name=attachment.filename, content_type=attachment.content_type)
+        token = self._attachment_store.put(attachment.data, attachment.content_type, attachment.filename)
+        return BotAttachment(
+            name=attachment.filename,
+            content_type=attachment.content_type,
+            content_url=f"{base_url}/attachments/{token}",
+        )
+
+    async def _resume_after_approval(self, turn_context: TurnContext, tenant_id: str, approval_id: str) -> None:
+        """Continue the SAME conversation right after a human approves via the
+        Teams card - without this, approving only updated the server-side
+        approval status; nothing ever told the LLM to actually act on it, so
+        the send/execute tool call never happened until the user separately
+        asked (e.g. "did you send it?") in a brand new turn. This resumes
+        with an explicit system-style instruction so the model reliably calls
+        the follow-up tool instead of maybe re-answering from stale context."""
+        prompt = (
+            f"[System] A human just approved pending approval {approval_id}. "
+            "Proceed now to complete the corresponding action (call the "
+            "matching execute/send tool for it) and confirm briefly once done."
+        )
+        try:
+            async with McpToolHub(self._mcp_servers, tenant_id=tenant_id) as tool_hub:
+                result, history = await handle_message(
+                    prompt,
+                    tool_hub,
+                    self._claude,
+                    self._settings.claude_model,
+                    self._chat_history.get(tenant_id),
+                    effort=self._settings.claude_effort,
+                )
+            self._chat_history[tenant_id] = history
+        except Exception:
+            logger.exception("failed to resume after approval for tenant_id=%s", tenant_id)
+            await turn_context.send_activity(
+                "Approved, but I couldn't complete the follow-up action automatically - ask me to proceed."
+            )
+            return
+        await self._send_result(turn_context, result)
 
     async def _ensure_graph_bootstrap(
         self, turn_context: TurnContext, tenant_id: str, magic_code: str | None = None
@@ -335,16 +428,32 @@ class TeamsBot(TeamsActivityHandler):
             await turn_context.send_activity(f"{_STATUS_EMOJI[Status.ERROR]} Unknown server {server!r}.")
             return
 
+        # Any other key in the Adaptive Card's submitted `data` is a payload
+        # field (see `approval_card`'s Input.Text ids) - a human may have
+        # edited it right there before tapping approve. Applied server-side,
+        # atomically with the approve decision (never through the LLM) - see
+        # `decide_approval`'s own docstring for why that boundary matters.
+        edits = {k: v for k, v in value.items() if k not in ("action", "server", "approval_id")}
+
         try:
-            decision = await decide_approval(server_url, approval_id, tenant_id, approve=action == "approve")
+            decision = await decide_approval(
+                server_url,
+                approval_id,
+                tenant_id,
+                approve=action == "approve",
+                edits=edits if action == "approve" and edits else None,
+            )
         except ApprovalDecisionError as exc:
             logger.warning("approval decision failed: tenant_id=%s detail=%s", tenant_id, exc.detail)
             await turn_context.send_activity(f"{_STATUS_EMOJI[Status.ERROR]} Couldn't {action}: {exc.detail}")
             return
 
-        emoji = _STATUS_EMOJI[Status.AUTONOMOUS] if action == "approve" else _STATUS_EMOJI[Status.ERROR]
-        verb = "Freigegeben" if action == "approve" else "Abgelehnt"
-        await turn_context.send_activity(f"{emoji} {verb} ({decision['status']}).")
+        if action == "approve":
+            await turn_context.send_activity(f"{_STATUS_EMOJI[Status.AUTONOMOUS]} Freigegeben – schließe ab...")
+            await self._resume_after_approval(turn_context, tenant_id, approval_id)
+            return
+
+        await turn_context.send_activity(f"{_STATUS_EMOJI[Status.ERROR]} Abgelehnt ({decision['status']}).")
 
 
 class _BotFrameworkConfig:
@@ -380,7 +489,8 @@ def build_adapter(settings: Settings) -> CloudAdapter:
 def build_app(settings: Settings) -> web.Application:
     mcp_servers = settings.parsed_mcp_servers()
     adapter = build_adapter(settings)
-    bot = TeamsBot(settings, mcp_servers)
+    attachment_store = _AttachmentStore()
+    bot = TeamsBot(settings, mcp_servers, attachment_store)
 
     async def messages(req: web.Request) -> web.Response:
         return await adapter.process(req, bot)
@@ -392,9 +502,26 @@ def build_app(settings: Settings) -> web.Application:
         # email-mcp-server's own /health route.
         return web.json_response({"status": "ok"})
 
+    async def get_attachment(req: web.Request) -> web.Response:
+        # Unauthenticated by design, same as /health: the token itself (a
+        # 24-byte random string, see _AttachmentStore.put) is the only secret
+        # - guessing one is as infeasible as guessing a signed URL, and
+        # that's exactly what this is standing in for. Short TTL limits
+        # exposure further.
+        item = attachment_store.get(req.match_info["token"])
+        if item is None:
+            return web.Response(status=404)
+        data, content_type, filename = item
+        return web.Response(
+            body=data,
+            content_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     app = web.Application()
     app.router.add_post("/api/messages", messages)
     app.router.add_get("/health", health)
+    app.router.add_get("/attachments/{token}", get_attachment)
     return app
 
 

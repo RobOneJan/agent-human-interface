@@ -90,6 +90,12 @@ class PendingApproval:
     server: str
     approval_id: str
     message: str
+    # Full human-review detail (e.g. to/cc/subject/body_preview for an email
+    # send, or every field of a SevDesk create) - a channel adapter renders
+    # this as editable fields on the approval card. Structural, like the rest
+    # of this shape: whatever a server puts here is shown, nothing hardcoded
+    # to one server's field names.
+    payload: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -287,7 +293,11 @@ async def _run_tool(
 
     elif not result.is_error and _looks_like_pending_approval(data):
         server_name, _tool_name = split_tool_name(block.name)
-        pending_approvals.append(PendingApproval(server=server_name, approval_id=data["id"], message=data["message"]))
+        raw_payload = data.get("payload")
+        payload = {k: str(v) for k, v in raw_payload.items()} if isinstance(raw_payload, dict) else {}
+        pending_approvals.append(
+            PendingApproval(server=server_name, approval_id=data["id"], message=data["message"], payload=payload)
+        )
         tool_status = Status.PENDING_APPROVAL
 
     tool_result = {

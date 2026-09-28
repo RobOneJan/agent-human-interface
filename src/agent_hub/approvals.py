@@ -33,7 +33,22 @@ def _base_url(mcp_server_url: str) -> str:
     return mcp_server_url.rsplit("/mcp", 1)[0]
 
 
-async def decide_approval(mcp_server_url: str, approval_id: str, tenant_id: str, *, approve: bool) -> dict:
+async def decide_approval(
+    mcp_server_url: str,
+    approval_id: str,
+    tenant_id: str,
+    *,
+    approve: bool,
+    edits: dict[str, str] | None = None,
+) -> dict:
+    """`edits` (approve only) carries field values a human changed on the
+    approval card before tapping approve - e.g. a corrected email address or
+    price. Applied server-side, atomically with the approve decision, never
+    routed through the LLM: this is a direct human-to-server edit, the same
+    trust boundary as the approve/reject tap itself, not a new capability an
+    agent could invoke unsupervised (see that server's approval route for
+    where it's actually applied, e.g. email-mcp-server's
+    `_decide_from_channel`)."""
     action = "approve" if approve else "reject"
     # The server resolves the pending approval's own tenant from this query
     # param (see email-mcp-server's mcp/server.py:_decide_from_channel) - it
@@ -43,7 +58,7 @@ async def decide_approval(mcp_server_url: str, approval_id: str, tenant_id: str,
     url = f"{_base_url(mcp_server_url)}/internal/approvals/{approval_id}/{action}?tenant={tenant_id}"
     headers = fetch_auth_header(mcp_server_url)
     async with httpx2.AsyncClient(timeout=15.0) as client:
-        response = await client.post(url, headers=headers, content=b"")
+        response = await client.post(url, headers=headers, json=edits or {})
     if response.status_code != 200:
         detail = response.json().get("error", response.text) if response.content else response.text
         raise ApprovalDecisionError(response.status_code, detail)
