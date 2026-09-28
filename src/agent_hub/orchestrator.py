@@ -144,6 +144,11 @@ async def handle_message(
     # None means "unknown", not "free" - one call on an unpriced model makes
     # the whole turn's cost unknown, since a partial sum would understate it.
     cost_usd: float | None = 0.0
+    # tool_use_id -> lighter content to substitute before this turn's
+    # messages are persisted as returned history - see _run_tool's own
+    # docstring on why (an inline PDF/image block must not be re-sent on
+    # every future turn just because it was read once).
+    history_overrides: dict[str, str] = {}
 
     for _ in range(MAX_TOOL_ITERATIONS):
         # tools/messages: schemas and history are built at runtime, not statically
@@ -176,7 +181,7 @@ async def handle_message(
                 cost_usd=cost_usd,
                 tool_call_count=tool_call_count,
             )
-            return result, _trim_history(messages)
+            return result, _trim_history(_redact_history(messages, history_overrides))
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -184,8 +189,12 @@ async def handle_message(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            tool_result, tool_status = await _run_tool(tool_hub, block, attachments, pending_approvals)
+            tool_result, tool_status, history_override = await _run_tool(
+                tool_hub, block, attachments, pending_approvals
+            )
             tool_results.append(tool_result)
+            if history_override is not None:
+                history_overrides[block.id] = history_override
             status = _combine(status, tool_status)
             tool_call_count += 1
 
@@ -199,7 +208,31 @@ async def handle_message(
         cost_usd=cost_usd,
         tool_call_count=tool_call_count,
     )
-    return result, _trim_history(messages)
+    return result, _trim_history(_redact_history(messages, history_overrides))
+
+
+def _redact_history(messages: list[dict], overrides: dict[str, str]) -> list[dict]:
+    """Swap the given tool_use_ids' tool_result content for their lighter
+    override text - see `_run_tool`'s docstring. Returns a new list; never
+    mutates `messages` in place, since callers may still hold references to
+    the original (e.g. this same list is reused for the next loop iteration
+    before a turn ends)."""
+    if not overrides:
+        return messages
+    redacted = []
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list):
+            redacted.append(message)
+            continue
+        new_content = [
+            {**block, "content": overrides[block["tool_use_id"]]}
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in overrides
+            else block
+            for block in content
+        ]
+        redacted.append({**message, "content": new_content})
+    return redacted
 
 
 def _trim_history(messages: list[dict]) -> list[dict]:
@@ -256,9 +289,30 @@ def _looks_like_pending_approval(data: object) -> bool:
     )
 
 
+# Content types Claude's Messages API can read natively: images via vision,
+# PDFs via its own document understanding (which also handles a scanned/
+# image-only PDF with no text layer - not just simple text extraction). Any
+# other type (docx, xlsx, ...) has no equivalent block type, so it falls back
+# to a plain confirmation the model is told not to guess the contents of.
+_INLINE_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+
+def _document_content_block(content_type: str, content_base64: str) -> dict | None:
+    if content_type == "application/pdf":
+        return {"type": "document", "source": {"type": "base64", "media_type": content_type, "data": content_base64}}
+    if content_type in _INLINE_IMAGE_TYPES:
+        return {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": content_base64}}
+    return None
+
+
 async def _run_tool(
     tool_hub: McpToolHub, block, attachments: list[Attachment], pending_approvals: list[PendingApproval]
-) -> tuple[dict, Status]:
+) -> tuple[dict, Status, str | None]:
+    """Third return value: a lighter `content` to substitute in *returned
+    history* for this tool_result (None means "keep as sent"). Only used for
+    attachments with an inline document/image block - see the call site in
+    `handle_message` and `_document_content_block`'s own comment on why the
+    full block must not persist into history unchanged."""
     try:
         result = await tool_hub.call_tool(block.name, block.input)
     except Exception as exc:  # noqa: BLE001 - any failure becomes a tool_result error, loop must not crash
@@ -270,11 +324,14 @@ async def _run_tool(
                 "is_error": True,
             },
             Status.ERROR,
+            None,
         )
 
     result_text = "\n".join(c.text for c in result.content if c.type == "text")
     data = result.structured_content
     tool_status = Status.ERROR if result.is_error else Status.AUTONOMOUS
+    result_content: str | list[dict] = result_text or "(empty result)"
+    history_override: str | None = None
 
     if not result.is_error and _looks_like_attachment(data):
         attachments.append(
@@ -284,12 +341,30 @@ async def _run_tool(
                 data=base64.b64decode(data["content_base64"]),
             )
         )
-        # Token hygiene: the tool's raw result_text carries the full base64
-        # blob (a 512KB attachment is >150K input tokens Claude would
-        # otherwise re-read on every future turn too, via history). Claude
-        # never needs the bytes - the file goes straight to the user above -
-        # so replace it with a short confirmation instead of resending it.
-        result_text = f"Attachment {data['filename']!r} ({data.get('size_bytes', '?')} bytes) retrieved and already delivered to the user directly - do not describe its contents unless asked."
+        light_text = (
+            f"Attachment {data['filename']!r} ({data.get('size_bytes', '?')} bytes) "
+            "retrieved and already delivered to the user directly."
+        )
+        doc_block = _document_content_block(data["content_type"], data["content_base64"])
+        if doc_block is not None:
+            # Shown to Claude for THIS turn only, so it can actually answer
+            # questions about the attachment (extract fields, summarize,
+            # etc.) instead of just knowing it exists. Token hygiene: a
+            # 512KB PDF is >150K input tokens Claude would otherwise re-read
+            # on every future turn too via history - history_override swaps
+            # this back to plain text before it's persisted (see
+            # handle_message), the same trade the old text-only confirmation
+            # already made, just deferred by one turn.
+            result_content = [
+                {"type": "text", "text": f"{light_text} Shown below - read it if the user's question calls for it."},
+                doc_block,
+            ]
+            history_override = light_text + " (shown to you only in the turn it was fetched - call the tool again to re-read it.)"
+        else:
+            result_content = (
+                f"{light_text} Its content type ({data['content_type']}) can't be shown to you directly - "
+                "do not guess at its contents."
+            )
 
     elif not result.is_error and _looks_like_pending_approval(data):
         server_name, _tool_name = split_tool_name(block.name)
@@ -303,8 +378,8 @@ async def _run_tool(
     tool_result = {
         "type": "tool_result",
         "tool_use_id": block.id,
-        "content": result_text or "(empty result)",
+        "content": result_content,
         "is_error": result.is_error,
     }
 
-    return tool_result, tool_status
+    return tool_result, tool_status, history_override

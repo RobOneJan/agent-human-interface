@@ -162,7 +162,7 @@ async def test_get_attachment_call_is_extracted_as_a_real_attachment() -> None:
         }
     )
 
-    result, _history = await handle_message("show me the pdf", hub, claude, "claude-opus-5")
+    result, history = await handle_message("show me the pdf", hub, claude, "claude-opus-5")
 
     assert result.text == "here is the pdf"
     assert result.status == Status.AUTONOMOUS
@@ -171,12 +171,26 @@ async def test_get_attachment_call_is_extracted_as_a_real_attachment() -> None:
     assert attachment.filename == "invoice.pdf"
     assert attachment.content_type == "application/pdf"
     assert attachment.data == raw_bytes
-    # token hygiene: the raw base64 must not be resent to Claude - Claude
-    # never needed it, and it would also become permanent history cost
+    encoded = base64.b64encode(raw_bytes).decode()
+
+    # Within THIS turn, Claude must actually see the PDF (native document
+    # understanding) so it can answer questions about it, not just
+    # acknowledge it exists - see orchestrator._document_content_block.
     second_call_messages = claude.messages.calls[1]["messages"]
     tool_result_content = second_call_messages[-1]["content"][0]["content"]
-    assert base64.b64encode(raw_bytes).decode() not in tool_result_content
-    assert "invoice.pdf" in tool_result_content
+    assert isinstance(tool_result_content, list)
+    assert any(
+        block.get("type") == "document" and block.get("source", {}).get("data") == encoded
+        for block in tool_result_content
+    )
+
+    # Token hygiene: the raw base64 must NOT be carried into the *returned*
+    # history - a future turn re-sending it on every call would be unbounded
+    # cost for a file Claude only needed to read once.
+    tool_result_message = next(m for m in history if m.get("role") == "user" and isinstance(m.get("content"), list))
+    redacted_content = tool_result_message["content"][0]["content"]
+    assert encoded not in redacted_content
+    assert "invoice.pdf" in redacted_content
 
 
 async def test_tool_error_becomes_error_tool_result_and_loop_continues() -> None:
