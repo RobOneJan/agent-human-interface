@@ -72,7 +72,7 @@ steps:
       # ^@^ switches the pair-separator from "," to "@" for this whole flag,
       # since MCP_SERVERS' own value needs a literal "," between servers -
       # see terbox-erp-mcp's own note on this exact gcloud footgun.
-      - --update-env-vars=^@^MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,terbox=https://terbox-erp-mcp-pdzqlk5ioq-ey.a.run.app/mcp@TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}@TEAMS_APP_ID=${_TEAMS_APP_ID}@TEAMS_APP_TENANT_ID=${_TEAMS_APP_TENANT_ID}
+      - --update-env-vars=^@^MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,terbox=https://terbox-erp-mcp-pdzqlk5ioq-ey.a.run.app/mcp@TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}@TEAMS_APP_ID=${_TEAMS_APP_ID}@TEAMS_APP_TENANT_ID=${_TEAMS_APP_TENANT_ID}@PUBLIC_BASE_URL=https://agent-hub-pdzqlk5ioq-ey.a.run.app
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
