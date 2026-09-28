@@ -128,6 +128,35 @@ def _tenant_id_of(turn_context: TurnContext) -> str | None:
     return from_property.aad_object_id or from_property.id
 
 
+def _log_assertion_claims(token: str) -> None:
+    """Log the unverified header/claims of the Teams SSO token before it's
+    forwarded for the Graph OBO exchange - diagnostic only, never used for
+    any actual auth decision. Safe to log: aud/iss/appid/tid/kid identify
+    which app+tenant issued the token for whom, not a credential themselves;
+    the signature (the actual secret part of the JWT) is never decoded or
+    logged. Added while chasing a persistent AADSTS50013 "assertion failed
+    signature validation" from email-mcp-server's OBO exchange that survived
+    three separate, confirmed-correct Application-ID-URI fixes - this shows
+    what the token itself actually claims instead of guessing a fourth one."""
+    try:
+        import jwt
+
+        header = jwt.get_unverified_header(token)
+        claims = jwt.decode(token, options={"verify_signature": False})
+        logger.info(
+            "teams SSO assertion: kid=%s alg=%s aud=%s iss=%s appid=%s tid=%s ver=%s",
+            header.get("kid"),
+            header.get("alg"),
+            claims.get("aud"),
+            claims.get("iss"),
+            claims.get("appid") or claims.get("azp"),
+            claims.get("tid"),
+            claims.get("ver"),
+        )
+    except Exception:
+        logger.exception("failed to decode assertion for diagnostic logging")
+
+
 async def _bootstrap_graph(mcp_servers: dict[str, str], tenant_id: str, user_assertion: str) -> None:
     """POST the just-obtained Teams SSO token to email-mcp-server's Graph
     provider bootstrap route (see that repo's `providers/graph/auth.py`).
@@ -247,6 +276,7 @@ class TeamsBot(TeamsActivityHandler):
             magic_code,
         )
         if token_response and token_response.token:
+            _log_assertion_claims(token_response.token)
             try:
                 await _bootstrap_graph(self._mcp_servers, tenant_id, token_response.token)
             except Exception:
