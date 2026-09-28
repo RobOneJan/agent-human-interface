@@ -297,7 +297,7 @@ class TeamsBot(TeamsActivityHandler):
     async def _send_result(self, turn_context: TurnContext, result: OrchestratorResult) -> None:
         await turn_context.send_activity(format_reply(result))
         for attachment in result.attachments:
-            await turn_context.send_activity(Activity(attachments=[self._file_attachment(attachment)]))
+            await turn_context.send_activity(self._file_link_message(attachment))
         for pending in result.pending_approvals:
             await turn_context.send_activity(
                 Activity(
@@ -309,17 +309,22 @@ class TeamsBot(TeamsActivityHandler):
         if cost_line is not None:
             await turn_context.send_activity(cost_line)
 
-    def _file_attachment(self, attachment: Attachment) -> BotAttachment:
+    def _file_link_message(self, attachment: Attachment) -> str:
+        # A structured Activity(attachments=[...]) with an arbitrary
+        # content_type (e.g. "application/pdf") gets rejected server-side by
+        # the Bot Framework Connector itself - "(BadArgument) Unknown
+        # attachment type" - before it ever reaches Teams (confirmed in
+        # production, 2026-09-28). Teams' actual supported path for bot ->
+        # user file delivery is the OAuth-heavy File Consent Card + Graph
+        # upload flow; a plain HTTPS link in the message text sidesteps that
+        # entirely and Teams renders it as an ordinary clickable link - less
+        # polished (no inline preview), but it actually works.
         base_url = self._settings.public_base_url
         if not base_url:
             logger.error("PUBLIC_BASE_URL is not configured - cannot deliver %r to Teams", attachment.filename)
-            return BotAttachment(name=attachment.filename, content_type=attachment.content_type)
+            return f"📎 {attachment.filename} (couldn't generate a link - ask an admin to check PUBLIC_BASE_URL)"
         token = self._attachment_store.put(attachment.data, attachment.content_type, attachment.filename)
-        return BotAttachment(
-            name=attachment.filename,
-            content_type=attachment.content_type,
-            content_url=f"{base_url}/attachments/{token}",
-        )
+        return f"📎 {attachment.filename}: {base_url}/attachments/{token}"
 
     async def _resume_after_approval(self, turn_context: TurnContext, tenant_id: str, approval_id: str) -> None:
         """Continue the SAME conversation right after a human approves via the
