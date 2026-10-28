@@ -4,12 +4,12 @@
 # --max-instances=1 stays pinned regardless of channel: chat_history and
 # _graph_ready (teams_bot.py) are in-memory, keyed per conversation/tenant,
 # with no cross-instance sharing - two instances would each answer with only
-# half the context. --min-instances=1/--no-cpu-throttling were originally
-# about Telegram's long-polling loop needing to run continuously with no
-# inbound HTTP to trigger CPU allocation; kept as-is under Teams too (a
-# webhook), where they now just mean "always warm, no cold start on the
-# first Teams message" - fine for a low-traffic internal bot, revisit if
-# cost ever matters more than latency here.
+# half the context. --min-instances was 1 for Telegram's long-polling loop,
+# which needs a continuously running instance with no inbound HTTP to wake
+# it. Under Teams (a webhook) every message is an inbound request, so it is
+# now 0: the service scales to zero when idle, at the cost of a cold start
+# on the first Teams message after a pause. Set it back to 1 if main.py
+# switches back to telegram_bot.py.
 substitutions:
   _REGION: europe-west3
   _REPO: agent-hub
@@ -64,7 +64,7 @@ steps:
       # runs (verified locally: an unsigned request gets a 401 straight from
       # the app) - see teams_bot.py's module docstring.
       - --allow-unauthenticated
-      - --min-instances=1
+      - --min-instances=0
       - --max-instances=1
       - --no-cpu-throttling
       - --service-account=agent-hub-run@$PROJECT_ID.iam.gserviceaccount.com
