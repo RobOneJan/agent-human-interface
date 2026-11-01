@@ -19,6 +19,7 @@ from enum import Enum
 
 from anthropic import AsyncAnthropic
 
+from agent_hub import attachment_refs
 from agent_hub.mcp_client import McpToolHub, split_tool_name
 from agent_hub.pricing import estimate_cost_usd
 
@@ -36,7 +37,10 @@ SYSTEM_PROMPT = (
     "there is no need to refuse or hedge on the request itself. When a tool "
     "returns a file (e.g. an email attachment), mention it in your reply - "
     "the file itself is delivered to the user separately, you do not need to "
-    "describe its raw contents unless asked.\n\n"
+    "describe its raw contents unless asked. Such a tool result also gives an "
+    "attachment_ref: to hand that file to another tool (e.g. to store an invoice), "
+    "pass the attachment_ref as the value of that tool's file content field, never "
+    "the content itself.\n\n"
     "This is a chat conversation, not a document - keep replies short. "
     "1-3 sentences for most answers. No headers, no bullet lists, no "
     "restating the question. Lead with the answer, skip preamble like "
@@ -314,7 +318,8 @@ async def _run_tool(
     `handle_message` and `_document_content_block`'s own comment on why the
     full block must not persist into history unchanged."""
     try:
-        result = await tool_hub.call_tool(block.name, block.input)
+        arguments = attachment_refs.resolve_refs(block.input, tool_hub.tenant_id)
+        result = await tool_hub.call_tool(block.name, arguments)
     except Exception as exc:  # noqa: BLE001 - any failure becomes a tool_result error, loop must not crash
         return (
             {
@@ -334,16 +339,12 @@ async def _run_tool(
     history_override: str | None = None
 
     if not result.is_error and _looks_like_attachment(data):
-        attachments.append(
-            Attachment(
-                filename=data["filename"],
-                content_type=data["content_type"],
-                data=base64.b64decode(data["content_base64"]),
-            )
-        )
+        content = base64.b64decode(data["content_base64"])
+        attachments.append(Attachment(filename=data["filename"], content_type=data["content_type"], data=content))
+        ref = attachment_refs.remember(tool_hub.tenant_id, content)
         light_text = (
             f"Attachment {data['filename']!r} ({data.get('size_bytes', '?')} bytes) "
-            "retrieved and already delivered to the user directly."
+            f"retrieved and already delivered to the user directly. attachment_ref: {ref}"
         )
         doc_block = _document_content_block(data["content_type"], data["content_base64"])
         if doc_block is not None:

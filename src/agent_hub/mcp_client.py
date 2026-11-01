@@ -75,6 +75,10 @@ class McpToolHub:
     async def __aexit__(self, *exc_info: object) -> None:
         await self._stack.aclose()
 
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
     def claude_tools(self) -> list[dict[str, Any]]:
         return self._claude_tools
 

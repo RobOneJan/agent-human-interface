@@ -47,6 +47,10 @@ Add-on     --adapter-->
   or `.../reject` HTTP route directly (see below). Deliberately separate
   from `mcp_client.py`/`orchestrator.py`: it is never reachable from the
   tool-use loop, only from a human-triggered Telegram button.
+- **`attachment_refs.py`** - hands a file from one MCP server to another without
+  it passing through Claude: Claude only sees a short `attachment-ref:` value,
+  which is swapped for the content in the arguments sent to the target server.
+
 - **`pricing.py`** - per-token USD rates for each supported `CLAUDE_MODEL`,
   used to turn a Claude API response's `usage` into an approximate cost -
   see "Cost" below.

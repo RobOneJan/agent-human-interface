@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
+from agent_hub import attachment_refs
 from agent_hub import orchestrator as orchestrator_module
 from agent_hub.orchestrator import (
     MAX_HISTORY_MESSAGES,
@@ -77,6 +79,8 @@ class FakeToolResult:
 
 
 class FakeToolHub:
+    tenant_id = "tenant-a"
+
     def __init__(self, results: dict[str, FakeToolResult] | None = None) -> None:
         self._results = results or {}
         self.calls: list[tuple[str, dict]] = []
@@ -519,3 +523,98 @@ async def test_cost_is_none_for_an_unpriced_model() -> None:
     result, _history = await handle_message("hello", hub, claude, "some-future-model")
 
     assert result.cost_usd is None
+
+
+# --- Handing a file from one server to another ------------------------------
+
+
+def _attachment_result(raw: bytes) -> FakeToolResult:
+    return FakeToolResult(
+        content=[SimpleNamespace(type="text", text="ok")],
+        structured_content={
+            "filename": "invoice.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": len(raw),
+            "content_base64": base64.b64encode(raw).decode(),
+        },
+    )
+
+
+def _ref_shown_to_claude(claude: FakeClaude) -> str:
+    content = claude.messages.calls[1]["messages"][-1]["content"][0]["content"]
+    text = content[0]["text"] if isinstance(content, list) else content
+    return re.search(r"attachment-ref:[0-9a-f]+", text).group(0)
+
+
+async def test_file_reaches_the_next_server_without_passing_through_claude() -> None:
+    raw = b"%PDF-1.4 real invoice"
+    encoded = base64.b64encode(raw).decode()
+
+    claude = FakeClaude(
+        [
+            FakeResponse(stop_reason="tool_use", content=[tool_use_block("t1", "email__get_attachment", {})]),
+            FakeResponse(stop_reason="end_turn", content=[text_block("placeholder")]),
+        ]
+    )
+    hub = FakeToolHub({"email__get_attachment": _attachment_result(raw)})
+    await handle_message("get it", hub, claude, "claude-opus-5")
+    ref = _ref_shown_to_claude(claude)
+
+    # A later turn, as after the user confirmed: only the reference is in the call.
+    tool_input = {"rechnung": {"anhaenge": [{"dateiname": "a.pdf", "inhalt_base64": ref}]}}
+    claude_next = FakeClaude(
+        [
+            FakeResponse(stop_reason="tool_use", content=[tool_use_block("t2", "terbox__store", tool_input)]),
+            FakeResponse(stop_reason="end_turn", content=[text_block("done")]),
+        ]
+    )
+    hub_next = FakeToolHub(
+        {"terbox__store": FakeToolResult(content=[SimpleNamespace(type="text", text="stored")])}
+    )
+    _result, history = await handle_message("store it", hub_next, claude_next, "claude-opus-5")
+
+    sent = hub_next.calls[0][1]
+    assert sent["rechnung"]["anhaenge"][0]["inhalt_base64"] == encoded
+    # Claude and the kept history only ever hold the reference.
+    assert tool_input["rechnung"]["anhaenge"][0]["inhalt_base64"] == ref
+    assert encoded not in str(claude_next.messages.calls)
+    assert encoded not in str(history)
+
+
+async def test_reference_from_another_tenant_is_refused_and_never_sent() -> None:
+    ref = attachment_refs.remember("tenant-b", b"%PDF-1.4 someone else's")
+    claude = FakeClaude(
+        [
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t1", "terbox__store", {"inhalt_base64": ref})],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("could not")]),
+        ]
+    )
+    hub = FakeToolHub({"terbox__store": FakeToolResult(content=[])})
+
+    result, _history = await handle_message("store it", hub, claude, "claude-opus-5")
+
+    assert hub.calls == []
+    assert result.status == Status.ERROR
+    tool_result = claude.messages.calls[1]["messages"][-1]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "fetch the file again" in tool_result["content"]
+
+
+def test_only_a_whole_string_counts_as_a_reference() -> None:
+    ref = attachment_refs.remember("t", b"x")
+    text = f"please look at {ref}"
+    assert attachment_refs.resolve_refs({"body": text}, "t") == {"body": text}
+    assert attachment_refs.resolve_refs({"a": [ref, 1, None]}, "t") == {"a": ["eA==", 1, None]}
+
+
+def test_expired_reference_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    ref = attachment_refs.remember("t", b"x")
+    real_monotonic = attachment_refs.time.monotonic
+    monkeypatch.setattr(
+        attachment_refs.time, "monotonic", lambda: real_monotonic() + attachment_refs.TTL_SECONDS + 1
+    )
+    with pytest.raises(attachment_refs.UnknownAttachmentRef):
+        attachment_refs.resolve_refs(ref, "t")
