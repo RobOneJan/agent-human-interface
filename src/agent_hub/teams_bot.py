@@ -247,8 +247,10 @@ COMMANDS: list[tuple[str, str, str | None]] = [
         "Offene Rechnungen",
         "Unbezahlte und überfällige Rechnungen",
         (
-            "Welche Eingangs- und Ausgangsrechnungen sind offen oder überfällig? Kurz, mit "
-            "Lieferant bzw. Kunde, Betrag und Fälligkeit."
+            "Welche Eingangs- und Ausgangsrechnungen sind offen oder überfällig, nach Fälligkeit "
+            "sortiert? Entwürfe mitzählen und als Entwurf kennzeichnen; Rechnungen mit "
+            "'Lastschrift' in der Notiz als Lastschrift (wird abgebucht). Kurz, mit Lieferant bzw. "
+            "Kunde, Betrag und Fälligkeit."
         ),
     ),
     (

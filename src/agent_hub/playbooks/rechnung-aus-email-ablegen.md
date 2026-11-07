@@ -9,8 +9,15 @@ Rechnung ab", "Rechnung von X einpflegen", ...).
 
 2. **Ablegen** mit `terbox__odoo_rechnung_ablegen`. Immer mitgeben:
    - `anhaenge`: die `attachment_ref` des Anhangs, nie den Inhalt selbst
-   - `lieferant_name`, `ust_id`, `rechnungsnummer`, `rechnungsdatum`,
-     `faelligkeitsdatum`, so wie sie auf der Rechnung stehen
+   - `lieferant_name`, `ust_id`, `rechnungsnummer`, `rechnungsdatum`, so wie
+     sie auf der Rechnung stehen
+   - `faelligkeitsdatum`: **immer**. Steht ein Datum da ("zahlbar bis 20.10."),
+     genau das. Steht nur eine Frist ("innerhalb 14 Tagen", "30 Tage netto"),
+     Rechnungsdatum plus diese Tage. Steht nichts, das Rechnungsdatum. Nie das
+     heutige Datum, nur weil keins zu finden war - im Zweifel nochmal lesen.
+   - `lastschrift`: true, wenn der Lieferant selbst abbucht ("Abbuchung",
+     "SEPA-Lastschrift", "ziehen wir ein", "Einzug"). Skonto bei Abbuchung
+     zählt nicht als Fälligkeit; Fälligkeit ist dann der Abbuchungstag.
    - `betraege`: Nettosumme je Steuersatz. **Immer angeben**, auch bei einer
      E-Rechnung. Eine Rechnung wird nie ohne Betrag abgelegt.
    - `kontakt` (E-Mail, Telefon, Adresse aus Rechnung oder Mail-Signatur) und

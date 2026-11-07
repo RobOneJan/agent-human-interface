@@ -28,9 +28,13 @@ Morgenlauf]"); auf Zuruf genauso ("mach die Büroarbeit").
    Offene Rechnungen und Gemeinkosten, aber nur als Zahlen):
    - `terbox__odoo_firmenueberblick`: offene und überfällige Eingangs- und
      Ausgangsrechnungen (Anzahl, Betrag), Entwürfe, offene Angebote/Bestellungen.
-   - Überfällige Rechnungen: die drei größten mit Lieferant bzw. Kunde, Betrag,
-     Fälligkeit (`terbox__odoo_suchen` auf account.move, `state` = posted,
-     `payment_state` in not_paid/partial, `invoice_date_due` < heute).
+   - Fälligkeiten der Eingangsrechnungen: `terbox__odoo_suchen` auf
+     account.move mit `move_type` = in_invoice, `state` in draft/posted,
+     `payment_state` in not_paid/partial, `invoice_date_due` <= heute + 7 Tage,
+     Felder partner_id, ref, amount_residual, amount_total, invoice_date_due,
+     state, narration, sortiert nach `invoice_date_due`. Entwürfe zählen mit:
+     auch eine ungebuchte Rechnung muss bezahlt werden. Steht in `narration`
+     "Lastschrift", wird sie abgebucht und nicht überwiesen.
    - Kosten des laufenden Monats: `terbox__odoo_gruppieren` auf
      account.analytic.line, Domain `date` >= Monatserster und `x_plan2_id` != false,
      Aggregat `amount:sum`, einmal gruppiert nach `x_plan2_id_1` (Einzelkosten /
@@ -50,7 +54,10 @@ Morgenlauf]"); auf Zuruf genauso ("mach die Büroarbeit").
    Lage:
    - Offen: Eingang <N> / <Betrag> (davon überfällig <N> / <Betrag>),
      Ausgang <N> / <Betrag> (davon überfällig <N> / <Betrag>)
-   - Überfällig zuerst: <Name> <Betrag> seit <Datum>, ...
+   - Überfällig: <Lieferant> <Betrag> seit <Datum>, ... (Lastschrift: "wird
+     abgebucht" statt überfällig)
+   - Fällig bis <Datum in 7 Tagen>: <Lieferant> <Betrag> am <Datum>, ...
+     (Entwürfe mit "(Entwurf)", Lastschriften mit "(Lastschrift)")
    - Kosten <Monat> (gebucht): Einzelkosten <Betrag>, Gemeinkosten <Betrag>
      (größte: <Kostenart> <Betrag>, ...)
    - Entwürfe noch nicht gebucht: <N> / <Betrag>
