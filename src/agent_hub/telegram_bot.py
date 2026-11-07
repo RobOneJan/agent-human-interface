@@ -18,6 +18,7 @@ from telegram.ext import Application, CallbackQueryHandler, ContextTypes, Messag
 
 from agent_hub.approvals import ApprovalDecisionError, decide_approval
 from agent_hub.config import Settings, get_settings
+from agent_hub.errors import user_message
 from agent_hub.health_server import start_health_server
 from agent_hub.mcp_client import McpToolHub
 from agent_hub.orchestrator import OrchestratorResult, PendingApproval, Status, handle_message
@@ -122,9 +123,9 @@ def build_application(settings: Settings) -> Application:
                     effort=settings.claude_effort,
                 )
             chat_history[chat.id] = history
-        except Exception:
+        except Exception as exc:
             logger.exception("failed to handle message from chat_id=%s", chat.id)
-            await message.reply_text("Sorry, something went wrong answering that. Try again shortly.")
+            await message.reply_text(user_message(exc))
             return
 
         await message.reply_text(format_reply(result))

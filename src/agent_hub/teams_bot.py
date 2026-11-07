@@ -49,6 +49,7 @@ import httpx2
 from agent_hub.approvals import ApprovalDecisionError, decide_approval
 from agent_hub.auth import fetch_auth_header
 from agent_hub.config import Settings, get_settings
+from agent_hub.errors import user_message
 from agent_hub.mcp_client import McpToolHub
 from agent_hub.orchestrator import Attachment, OrchestratorResult, PendingApproval, Status, handle_message
 
@@ -287,9 +288,9 @@ class TeamsBot(TeamsActivityHandler):
                     effort=self._settings.claude_effort,
                 )
             self._chat_history[tenant_id] = history
-        except Exception:
+        except Exception as exc:
             logger.exception("failed to handle message from tenant_id=%s", tenant_id)
-            await turn_context.send_activity("Sorry, something went wrong answering that. Try again shortly.")
+            await turn_context.send_activity(user_message(exc))
             return
 
         await self._send_result(turn_context, result)

@@ -19,7 +19,7 @@ from enum import Enum
 
 from anthropic import AsyncAnthropic
 
-from agent_hub import attachment_refs
+from agent_hub import attachment_refs, playbooks
 from agent_hub.mcp_client import McpToolHub, split_tool_name
 from agent_hub.pricing import estimate_cost_usd
 
@@ -48,6 +48,10 @@ SYSTEM_PROMPT = (
     "'I found that...' or 'Here is a summary'. Only go longer than a few "
     "sentences if the user explicitly asks for detail or a list of items."
 )
+
+
+# Fixed for the life of the process, so the cached prompt prefix stays valid.
+SYSTEM = SYSTEM_PROMPT + playbooks.load()
 
 
 class Status(Enum):
@@ -171,7 +175,7 @@ async def handle_message(
         response = await claude.messages.create(  # type: ignore[call-overload]
             model=model,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
+            system=SYSTEM,
             tools=tools,
             messages=messages,
             cache_control={"type": "ephemeral", "ttl": "1h"},

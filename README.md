@@ -47,6 +47,15 @@ Add-on     --adapter-->
   or `.../reject` HTTP route directly (see below). Deliberately separate
   from `mcp_client.py`/`orchestrator.py`: it is never reachable from the
   tool-use loop, only from a human-triggered Telegram button.
+- **`playbooks/`** - the company's standard processes as Markdown, one file per
+  process (e.g. `rechnung-aus-email-ablegen.md`). Every `.md` file there is
+  appended to the system prompt at startup, in file-name order, so describing
+  or changing a process is a file edit plus a deploy, no code change.
+  `PLAYBOOK_DIR` points somewhere else instead (e.g. a mounted bucket).
+- **`errors.py`** - turns failures the user can fix (empty Anthropic balance,
+  rejected key, rate limit, an unreachable service) into a readable chat
+  message; anything else stays the generic one.
+
 - **`attachment_refs.py`** - hands a file from one MCP server to another without
   it passing through Claude: Claude only sees a short `attachment-ref:` value,
   which is swapped for the content in the arguments sent to the target server.
