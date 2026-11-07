@@ -255,8 +255,9 @@ COMMANDS: list[tuple[str, str, str | None]] = [
         "Gemeinkosten",
         "Kosten des laufenden Monats je Kostenart",
         (
-            "Wie hoch sind die Kosten im laufenden Monat je Kostenart (Plan Kostenarten), Einzel- "
-            "und Gemeinkosten getrennt? Entwürfe und gebuchte Rechnungen getrennt ausweisen."
+            "Wie hoch sind die Kosten im laufenden Monat je Kostenart, Einzel- und Gemeinkosten "
+            "getrennt? Gebucht: account.analytic.line, gruppiert nach x_plan2_id_1 und x_plan2_id "
+            "(die Spalten des Plans Kostenarten). Noch nicht gebuchte Entwürfe gesondert nennen."
         ),
     ),
     ("Menü", "Alle Aktionen als Knöpfe", None),

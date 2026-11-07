@@ -31,11 +31,13 @@ Morgenlauf]"); auf Zuruf genauso ("mach die Büroarbeit").
    - Überfällige Rechnungen: die drei größten mit Lieferant bzw. Kunde, Betrag,
      Fälligkeit (`terbox__odoo_suchen` auf account.move, `state` = posted,
      `payment_state` in not_paid/partial, `invoice_date_due` < heute).
-   - Gemeinkosten des laufenden Monats: `terbox__odoo_gruppieren` auf
-     account.analytic.line, Domain `date` >= Monatserster, gruppiert nach
-     `account_id`, Aggregat `amount:sum`. Das sind gebuchte Rechnungen; Beträge
-     sind dort negativ, als Kosten positiv angeben. Summe Einzelkosten,
-     Summe Gemeinkosten und die drei größten Kostenarten.
+   - Kosten des laufenden Monats: `terbox__odoo_gruppieren` auf
+     account.analytic.line, Domain `date` >= Monatserster und `x_plan2_id` != false,
+     Aggregat `amount:sum`, einmal gruppiert nach `x_plan2_id_1` (Einzelkosten /
+     Gemeinkosten) und einmal nach `x_plan2_id` (Kostenart). `x_plan2_id` ist in
+     Odoo die Spalte des Plans "Kostenarten", nicht `account_id`. Das sind nur
+     gebuchte Rechnungen; die Beträge sind dort negativ, als Kosten positiv
+     angeben. Summe Einzelkosten, Summe Gemeinkosten, die drei größten Kostenarten.
 
 6. **Eine einzige Nachricht** als Ergebnis, kurz, in dieser Form:
 
