@@ -40,7 +40,8 @@ SYSTEM_PROMPT = (
     "describe its raw contents unless asked. Such a tool result also gives an "
     "attachment_ref: to hand that file to another tool (e.g. to store an invoice), "
     "pass the attachment_ref as the value of that tool's file content field, never "
-    "the content itself.\n\n"
+    "the content itself. A file handed on like that is not sent to the user, so "
+    "don't mention it.\n\n"
     "This is a chat conversation, not a document - keep replies short. "
     "1-3 sentences for most answers. No headers, no bullet lists, no "
     "restating the question. Lead with the answer, skip preamble like "
@@ -79,6 +80,8 @@ class Attachment:
     filename: str
     content_type: str
     data: bytes
+    # The attachment_ref Claude was given for this file (see attachment_refs.py).
+    ref: str | None = None
 
 
 @dataclass
@@ -143,6 +146,10 @@ async def handle_message(
     tools = tool_hub.claude_tools()
     attachments: list[Attachment] = []
     pending_approvals: list[PendingApproval] = []
+    # Refs handed to another tool this turn: those files went where they were
+    # needed (e.g. an invoice into the ERP), so posting them in the chat as well
+    # would only add noise.
+    handed_over: set[str] = set()
     status = Status.AUTONOMOUS
     tool_call_count = 0
     # None means "unknown", not "free" - one call on an unpriced model makes
@@ -180,7 +187,7 @@ async def handle_message(
             result = OrchestratorResult(
                 text=final_text,
                 status=status,
-                attachments=attachments,
+                attachments=[a for a in attachments if a.ref not in handed_over],
                 pending_approvals=pending_approvals,
                 cost_usd=cost_usd,
                 tool_call_count=tool_call_count,
@@ -194,7 +201,7 @@ async def handle_message(
             if block.type != "tool_use":
                 continue
             tool_result, tool_status, history_override = await _run_tool(
-                tool_hub, block, attachments, pending_approvals
+                tool_hub, block, attachments, pending_approvals, handed_over
             )
             tool_results.append(tool_result)
             if history_override is not None:
@@ -207,7 +214,7 @@ async def handle_message(
     result = OrchestratorResult(
         text="Sorry, that took too many steps to answer - try asking in a more specific way.",
         status=Status.ERROR,
-        attachments=attachments,
+        attachments=[a for a in attachments if a.ref not in handed_over],
         pending_approvals=pending_approvals,
         cost_usd=cost_usd,
         tool_call_count=tool_call_count,
@@ -310,7 +317,11 @@ def _document_content_block(content_type: str, content_base64: str) -> dict | No
 
 
 async def _run_tool(
-    tool_hub: McpToolHub, block, attachments: list[Attachment], pending_approvals: list[PendingApproval]
+    tool_hub: McpToolHub,
+    block,
+    attachments: list[Attachment],
+    pending_approvals: list[PendingApproval],
+    handed_over: set[str],
 ) -> tuple[dict, Status, str | None]:
     """Third return value: a lighter `content` to substitute in *returned
     history* for this tool_result (None means "keep as sent"). Only used for
@@ -318,7 +329,7 @@ async def _run_tool(
     `handle_message` and `_document_content_block`'s own comment on why the
     full block must not persist into history unchanged."""
     try:
-        arguments = attachment_refs.resolve_refs(block.input, tool_hub.tenant_id)
+        arguments = attachment_refs.resolve_refs(block.input, tool_hub.tenant_id, handed_over)
         result = await tool_hub.call_tool(block.name, arguments)
     except Exception as exc:  # noqa: BLE001 - any failure becomes a tool_result error, loop must not crash
         return (
@@ -340,8 +351,10 @@ async def _run_tool(
 
     if not result.is_error and _looks_like_attachment(data):
         content = base64.b64decode(data["content_base64"])
-        attachments.append(Attachment(filename=data["filename"], content_type=data["content_type"], data=content))
         ref = attachment_refs.remember(tool_hub.tenant_id, content)
+        attachments.append(
+            Attachment(filename=data["filename"], content_type=data["content_type"], data=content, ref=ref)
+        )
         light_text = (
             f"Attachment {data['filename']!r} ({data.get('size_bytes', '?')} bytes) "
             f"retrieved and already delivered to the user directly. attachment_ref: {ref}"

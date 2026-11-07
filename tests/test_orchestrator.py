@@ -618,3 +618,30 @@ def test_expired_reference_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     with pytest.raises(attachment_refs.UnknownAttachmentRef):
         attachment_refs.resolve_refs(ref, "t")
+
+
+async def test_file_handed_to_another_tool_is_not_also_posted_in_the_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = b"%PDF-1.4 invoice for the erp"
+    monkeypatch.setattr(attachment_refs.uuid, "uuid4", lambda: SimpleNamespace(hex="fixed"))
+    claude = FakeClaude(
+        [
+            FakeResponse(stop_reason="tool_use", content=[tool_use_block("t1", "email__get_attachment", {})]),
+            FakeResponse(
+                stop_reason="tool_use",
+                content=[tool_use_block("t2", "terbox__store", {"inhalt_base64": "attachment-ref:fixed"})],
+            ),
+            FakeResponse(stop_reason="end_turn", content=[text_block("Rechnung abgelegt.")]),
+        ]
+    )
+    hub = FakeToolHub(
+        {
+            "email__get_attachment": _attachment_result(raw),
+            "terbox__store": FakeToolResult(content=[SimpleNamespace(type="text", text="stored")]),
+        }
+    )
+
+    result, _history = await handle_message("file the invoice", hub, claude, "claude-opus-5")
+
+    assert hub.calls[1][1]["inhalt_base64"] == base64.b64encode(raw).decode()
+    assert result.attachments == []
+    assert result.text == "Rechnung abgelegt."

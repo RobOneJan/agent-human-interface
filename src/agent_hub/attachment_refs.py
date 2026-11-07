@@ -39,17 +39,18 @@ def remember(tenant_id: str, content: bytes) -> str:
     return ref
 
 
-def resolve_refs(value: Any, tenant_id: str) -> Any:
+def resolve_refs(value: Any, tenant_id: str, used: set[str] | None = None) -> Any:
     """Return `value` with each exact reference string replaced by base64 content.
 
     Only a whole string counts, so text that merely mentions a reference (an email
     body quoting one, say) is passed through untouched. Builds new containers and
-    never mutates `value`, because the original is what stays in history.
+    never mutates `value`, because the original is what stays in history. Each
+    reference resolved is added to `used`, if given.
     """
     if isinstance(value, dict):
-        return {key: resolve_refs(item, tenant_id) for key, item in value.items()}
+        return {key: resolve_refs(item, tenant_id, used) for key, item in value.items()}
     if isinstance(value, list):
-        return [resolve_refs(item, tenant_id) for item in value]
+        return [resolve_refs(item, tenant_id, used) for item in value]
     if isinstance(value, str) and value.startswith(REF_PREFIX):
         _gc()
         entry = _refs.get((tenant_id, value))
@@ -57,6 +58,8 @@ def resolve_refs(value: Any, tenant_id: str) -> Any:
             raise UnknownAttachmentRef(
                 f"{value} is no longer available - fetch the file again to get a new reference"
             )
+        if used is not None:
+            used.add(value)
         return base64.b64encode(entry[0]).decode("ascii")
     return value
 
