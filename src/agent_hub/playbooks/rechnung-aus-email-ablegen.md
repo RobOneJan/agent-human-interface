@@ -27,14 +27,16 @@ Rechnung ab", "Rechnung von X einpflegen", ...).
    Nie Einzelpositionen als Rechnungszeilen anlegen. Das Werkzeug legt eine
    Summenzeile je Steuersatz an.
 
-3. **Ergebnis auswerten** (`status`):
-   - `abgelegt`: weiter mit Schritt 4.
+3. **Ergebnis auswerten** (`ergebnis`):
+   - `abgelegt`: der Entwurf liegt in Odoo, eine Karte fragt, ob gebucht werden
+     soll. Weiter mit Schritt 4. Nicht selbst buchen; das passiert erst mit der
+     Freigabe auf der Karte.
+   - `neuer_lieferant`: der Lieferant ist neu. Es gibt **eine** Karte, die
+     Lieferant anlegen, Rechnung ablegen und buchen zusammen freigibt. Nicht
+     zusätzlich `odoo_lieferant_anlegen` aufrufen. Schritt 4 entfällt.
    - `bereits_vorhanden` / `bereits_abgelegt`: die Rechnung ist schon in Odoo.
      Nur die `meldung` weitergeben (sie nennt den Lieferanten). Fertig.
    - `nummer_bei_anderem_lieferanten`: kurz nachfragen, nichts weiter tun.
-   - `lieferant_unbekannt`: `terbox__odoo_lieferant_anlegen` mit dem
-     `lieferant_vorschlag` aufrufen (Freigabe). Nach der Freigabe Schritt 2
-     mit der neuen `lieferant_id` wiederholen.
    - `lieferant_unklar`: kurz nachfragen, welcher der `kandidaten` gemeint ist.
    - Fehler `betraege missing`: Summen aus der Rechnung lesen und erneut aufrufen.
 
@@ -56,4 +58,5 @@ Rechnung ab", "Rechnung von X einpflegen", ...).
 
 6. **Antwort im Chat**: genau die `meldung` aus Schritt 2, ggf. ergänzt um
    "Preisfreigabe für N Artikel angefragt." Keine Positionslisten, keine
-   Zusammenfassung der Rechnung. Eine Rechnung wird nie gebucht oder bezahlt.
+   Zusammenfassung der Rechnung. Gebucht wird nur über die Freigabekarte,
+   bezahlt wird nie.
