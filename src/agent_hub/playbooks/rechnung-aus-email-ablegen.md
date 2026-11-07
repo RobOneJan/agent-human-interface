@@ -15,9 +15,14 @@ Rechnung ab", "Rechnung von X einpflegen", ...).
      E-Rechnung. Eine Rechnung wird nie ohne Betrag abgelegt.
    - `kontakt` (E-Mail, Telefon, Adresse aus Rechnung oder Mail-Signatur) und
      `iban`, wenn sichtbar
-   - `kategorie`, wenn die Art der Ausgabe klar ist (eine bestehende
-     Produktkategorie aus Odoo, z. B. Werkzeuge, Marketing, IT/Software,
-     KFZ,Fahrzeug & Kraftstoff, Büro & Verwaltung). Im Zweifel weglassen.
+   - `kategorie`: die Kostenart für das interne Reporting, wenn klar ist, wofür
+     das Geld ausgegeben wurde. Genau einer dieser Namen:
+     - Einzelkosten (fließt direkt in unsere Produkte): Material, Fremdleistung
+     - Gemeinkosten: Werkzeuge & Betriebsmittel, Fahrzeuge & Kraftstoff,
+       Transport & Versand, Marketing, IT & Software, Büro & Verwaltung,
+       Gebäude & Miete, Beratung & Dienstleistungen, Sonstiges
+
+     Bei gemischten Rechnungen die überwiegende Kostenart. Im Zweifel weglassen.
 
    Nie Einzelpositionen als Rechnungszeilen anlegen. Das Werkzeug legt eine
    Summenzeile je Steuersatz an.
