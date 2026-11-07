@@ -32,6 +32,7 @@ Teams SSO flow, in order:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
@@ -42,10 +43,18 @@ from anthropic import AsyncAnthropic
 from botbuilder.core import CardFactory, MemoryStorage, TurnContext
 from botbuilder.core.teams import TeamsActivityHandler, TeamsSSOTokenExchangeMiddleware
 from botbuilder.integration.aiohttp import CloudAdapter, ConfigurationBotFrameworkAuthentication
-from botbuilder.schema import Activity, ActionTypes, Attachment as BotAttachment, CardAction, OAuthCard
+from botbuilder.schema import (
+    Activity,
+    ActionTypes,
+    Attachment as BotAttachment,
+    CardAction,
+    ConversationReference,
+    OAuthCard,
+)
 from botframework.connector.auth.user_token_client import UserTokenClient
 
 import httpx2
+from agent_hub import jobs, state
 from agent_hub.approvals import ApprovalDecisionError, decide_approval
 from agent_hub.auth import fetch_auth_header
 from agent_hub.config import Settings, get_settings
@@ -252,6 +261,11 @@ class TeamsBot(TeamsActivityHandler):
         if tenant_id is None:
             logger.warning("ignoring message with no resolvable tenant id")
             return
+        # Where to reach this user later without them writing first (the
+        # morning job). Refreshed on every message: Teams may move a chat to
+        # another service URL.
+        reference = TurnContext.get_conversation_reference(turn_context.activity)
+        state.save("conversation", tenant_id, reference.serialize())
 
         value = turn_context.activity.value
         if isinstance(value, dict) and "action" in value:
@@ -294,6 +308,50 @@ class TeamsBot(TeamsActivityHandler):
             return
 
         await self._send_result(turn_context, result)
+
+    async def run_office_job(self, adapter: CloudAdapter, tenant_id: str) -> str:
+        """The morning office round for one tenant: run the playbook over the
+        emails since the last run and post the result to their Teams chat.
+        Returns a short status for the scheduler's log."""
+        stored = state.load("conversation", tenant_id)
+        if stored is None:
+            return "skipped: no Teams conversation known yet - the user must message the bot once"
+        reference = ConversationReference().deserialize(stored)
+        now = jobs.now()
+        start = jobs.since(tenant_id, now)
+        prompt = jobs.office_prompt(start, now)
+        logger.info("office job: tenant_id=%s since=%s", tenant_id, start.isoformat())
+
+        try:
+            async with McpToolHub(self._mcp_servers, tenant_id=tenant_id) as tool_hub:
+                result, history = await handle_message(
+                    prompt,
+                    tool_hub,
+                    self._claude,
+                    self._settings.claude_model,
+                    None,  # a fresh conversation, not the chat's last topic
+                    effort=self._settings.claude_effort,
+                    max_tool_iterations=jobs.JOB_MAX_TOOL_ITERATIONS,
+                )
+        except Exception as exc:
+            logger.exception("office job failed for tenant_id=%s", tenant_id)
+            failure = f"Morgenlauf fehlgeschlagen. {user_message(exc)}"
+
+            async def report_failure(turn_context: TurnContext) -> None:
+                await turn_context.send_activity(failure)
+
+            await adapter.continue_conversation(reference, report_failure, self._settings.teams_app_id)
+            return f"failed: {type(exc).__name__}"
+
+        # So approving a card from this run continues with the run's context.
+        self._chat_history[tenant_id] = history
+
+        async def deliver(turn_context: TurnContext) -> None:
+            await self._send_result(turn_context, result)
+
+        await adapter.continue_conversation(reference, deliver, self._settings.teams_app_id)
+        jobs.mark_done(tenant_id, now)
+        return f"done: {result.tool_call_count} tool calls, {len(result.pending_approvals)} approvals"
 
     async def _send_result(self, turn_context: TurnContext, result: OrchestratorResult) -> None:
         await turn_context.send_activity(format_reply(result))
@@ -524,7 +582,28 @@ def build_app(settings: Settings) -> web.Application:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    job_lock = asyncio.Lock()
+
+    async def office_job(req: web.Request) -> web.Response:
+        # The service is public (Teams must reach /api/messages); this route
+        # authenticates its caller itself - see jobs.verify_invoker.
+        audience = f"{settings.public_base_url}{req.path}"
+        try:
+            await jobs.verify_invoker(req.headers.get("Authorization"), audience, settings.job_invoker)
+        except jobs.JobAuthError as exc:
+            logger.warning("office job rejected: %s", exc)
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if job_lock.locked():
+            return web.json_response({"error": "a job is already running"}, status=409)
+        async with job_lock:
+            results = {
+                tenant_id: await bot.run_office_job(adapter, tenant_id) for tenant_id in state.tenants("conversation")
+            }
+        logger.info("office job finished: %s", results)
+        return web.json_response({"tenants": results})
+
     app = web.Application()
+    app.router.add_post("/internal/jobs/buero", office_job)
     app.router.add_post("/api/messages", messages)
     app.router.add_get("/health", health)
     app.router.add_get("/attachments/{token}", get_attachment)

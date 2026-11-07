@@ -133,6 +133,7 @@ async def handle_message(
     model: str,
     history: list[dict] | None = None,
     effort: str = "low",
+    max_tool_iterations: int = MAX_TOOL_ITERATIONS,
 ) -> tuple[OrchestratorResult, list[dict]]:
     """`history` is the prior conversation (already-sent messages, in Claude's
     own `messages` shape) - pass back whatever this returns as `history` on
@@ -165,7 +166,7 @@ async def handle_message(
     # every future turn just because it was read once).
     history_overrides: dict[str, str] = {}
 
-    for _ in range(MAX_TOOL_ITERATIONS):
+    for _ in range(max_tool_iterations):
         # tools/messages: schemas and history are built at runtime, not statically
         # typed against the SDK's TypedDicts. cache_control: caches system+tools+
         # history as one growing prefix; 1h (not the 5m default) because this loop

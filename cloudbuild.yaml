@@ -67,12 +67,21 @@ steps:
       - --min-instances=0
       - --max-instances=1
       - --no-cpu-throttling
+      # The morning office job (jobs.py) reads a day of email and may file
+      # several invoices in one request, far beyond the 300s default.
+      - --timeout=1800
+      # GCS-backed volume for state that must survive scaling to zero: the
+      # Teams chat to post the morning summary to and the last run's time
+      # (state.py). Same stopgap as email-mcp-server's ./var; single instance
+      # only (--max-instances=1 above).
+      - --add-volume=name=var,type=cloud-storage,bucket=$PROJECT_ID-agent-hub-var
+      - --add-volume-mount=volume=var,mount-path=/app/var
       - --service-account=agent-hub-run@$PROJECT_ID.iam.gserviceaccount.com
       - --set-secrets=TELEGRAM_BOT_TOKEN=agent-hub-telegram-bot-token:latest,ANTHROPIC_API_KEY=agent-hub-anthropic-api-key:latest,TEAMS_APP_PASSWORD=agent-hub-teams-app-password:latest
       # ^@^ switches the pair-separator from "," to "@" for this whole flag,
       # since MCP_SERVERS' own value needs a literal "," between servers -
       # see terbox-erp-mcp's own note on this exact gcloud footgun.
-      - --update-env-vars=^@^MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,terbox=https://terbox-erp-mcp-pdzqlk5ioq-ey.a.run.app/mcp@TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}@TEAMS_APP_ID=${_TEAMS_APP_ID}@TEAMS_APP_TENANT_ID=${_TEAMS_APP_TENANT_ID}@PUBLIC_BASE_URL=https://agent-hub-pdzqlk5ioq-ey.a.run.app
+      - --update-env-vars=^@^MCP_SERVERS=email=https://email-mcp-server-pdzqlk5ioq-ey.a.run.app/mcp,terbox=https://terbox-erp-mcp-pdzqlk5ioq-ey.a.run.app/mcp@TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}@TEAMS_APP_ID=${_TEAMS_APP_ID}@TEAMS_APP_TENANT_ID=${_TEAMS_APP_TENANT_ID}@PUBLIC_BASE_URL=https://agent-hub-pdzqlk5ioq-ey.a.run.app@STATE_DIR=/app/var@JOB_INVOKER=agent-hub-scheduler@$PROJECT_ID.iam.gserviceaccount.com
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID

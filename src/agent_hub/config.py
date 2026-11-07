@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # effort gave up little accuracy for real savings - see README "Cost".
     claude_effort: str = "low"
 
+    # Service account allowed to start scheduled jobs (POST /internal/jobs/...),
+    # e.g. the one Cloud Scheduler signs its OIDC token with. Unset: jobs off.
+    job_invoker: str | None = None
+
     def parsed_mcp_servers(self) -> dict[str, str]:
         servers: dict[str, str] = {}
         for entry in self.mcp_servers.split(","):

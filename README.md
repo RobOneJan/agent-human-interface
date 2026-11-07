@@ -56,6 +56,14 @@ Add-on     --adapter-->
   rejected key, rate limit, an unreachable service) into a readable chat
   message; anything else stays the generic one.
 
+- **`jobs.py`** - scheduled work without a user message. Cloud Scheduler calls
+  `POST /internal/jobs/buero` every weekday at 6:45 (Europe/Berlin) with an
+  OIDC token of `JOB_INVOKER`; the route checks that token itself, since the
+  service is public. The job runs the "Büroarbeit am Morgen" playbook over the
+  emails since the last successful run (at most 4 days back) and posts one
+  summary plus any approval cards to the user's Teams chat - the one they last
+  wrote from, kept in `state.py`. The user must have messaged the bot once.
+
 - **`attachment_refs.py`** - hands a file from one MCP server to another without
   it passing through Claude: Claude only sees a short `attachment-ref:` value,
   which is swapped for the content in the arguments sent to the target server.
