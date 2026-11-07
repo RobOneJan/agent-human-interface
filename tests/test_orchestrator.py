@@ -645,3 +645,12 @@ async def test_file_handed_to_another_tool_is_not_also_posted_in_the_chat(monkey
     assert hub.calls[1][1]["inhalt_base64"] == base64.b64encode(raw).decode()
     assert result.attachments == []
     assert result.text == "Rechnung abgelegt."
+
+
+def test_oversized_image_is_not_shown_inline_but_small_one_is() -> None:
+    small = base64.b64encode(b"\x89PNG" + b"0" * 100).decode()
+    large = base64.b64encode(b"\x89PNG" + b"0" * (orchestrator_module.MAX_INLINE_IMAGE_BYTES + 1)).decode()
+    assert orchestrator_module._document_content_block("image/png", small)["type"] == "image"
+    assert orchestrator_module._document_content_block("image/png", large) is None
+    # PDFs are read per page; their size limit is the request's, far above this.
+    assert orchestrator_module._document_content_block("application/pdf", large)["type"] == "document"

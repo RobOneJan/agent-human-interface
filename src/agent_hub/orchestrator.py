@@ -308,10 +308,15 @@ def _looks_like_pending_approval(data: object) -> bool:
 _INLINE_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 
+# The Messages API rejects a larger image outright, which would fail the whole
+# turn rather than just this one file.
+MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
+
+
 def _document_content_block(content_type: str, content_base64: str) -> dict | None:
     if content_type == "application/pdf":
         return {"type": "document", "source": {"type": "base64", "media_type": content_type, "data": content_base64}}
-    if content_type in _INLINE_IMAGE_TYPES:
+    if content_type in _INLINE_IMAGE_TYPES and len(content_base64) * 3 // 4 <= MAX_INLINE_IMAGE_BYTES:
         return {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": content_base64}}
     return None
 
