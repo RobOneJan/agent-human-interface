@@ -235,6 +235,66 @@ async def _bootstrap_graph(mcp_servers: dict[str, str], tenant_id: str, user_ass
     response.raise_for_status()
 
 
+# Fixed actions, offered as the bot's command menu in Teams (configured in the
+# Teams Developer Portal under the bot's commands, same titles) and as buttons
+# by "Menü". Clicking one sends its title as a message. Most are just a
+# well-phrased prompt; "Büroarbeit" starts the morning job instead.
+COMMANDS: list[tuple[str, str, str | None]] = [
+    # (title as shown and sent, description, prompt it stands for)
+    ("Büroarbeit", "Mails seit dem letzten Lauf verarbeiten", None),
+    ("Firmenüberblick", "Offene Rechnungen, Bestellungen, Stammdaten", "Gib mir einen kurzen Firmenüberblick aus Odoo."),
+    (
+        "Offene Rechnungen",
+        "Unbezahlte und überfällige Rechnungen",
+        (
+            "Welche Eingangs- und Ausgangsrechnungen sind offen oder überfällig? Kurz, mit "
+            "Lieferant bzw. Kunde, Betrag und Fälligkeit."
+        ),
+    ),
+    (
+        "Gemeinkosten",
+        "Kosten des laufenden Monats je Kostenart",
+        (
+            "Wie hoch sind die Kosten im laufenden Monat je Kostenart (Plan Kostenarten), Einzel- "
+            "und Gemeinkosten getrennt? Entwürfe und gebuchte Rechnungen getrennt ausweisen."
+        ),
+    ),
+    ("Menü", "Alle Aktionen als Knöpfe", None),
+]
+_BY_KEY = {title.lower(): (title, description, prompt) for title, description, prompt in COMMANDS}
+_ALIASES = {"menu": "menü", "hilfe": "menü", "büro": "büroarbeit", "buero": "büroarbeit", "bueroarbeit": "büroarbeit"}
+
+
+def _command_of(text: str) -> str | None:
+    """The command's title if `text` is one of them (case, trailing punctuation
+    and a few spellings don't matter), else None."""
+    key = re.sub(r"[\s.!?]+$", "", text.strip().lower())
+    key = _ALIASES.get(key, key)
+    return _BY_KEY[key][0] if key in _BY_KEY else None
+
+
+def actions_card() -> BotAttachment:
+    """Every command as a button; a tap sends the title like a typed message."""
+    shown = [command for command in COMMANDS if command[0] != "Menü"]
+    body = [{"type": "TextBlock", "text": "Was soll ich tun?", "weight": "bolder"}] + [
+        {"type": "TextBlock", "text": f"**{title}**: {description}", "wrap": True, "spacing": "small"}
+        for title, description, _ in shown
+    ]
+    actions = [
+        {"type": "Action.Submit", "title": title, "data": {"msteams": {"type": "imBack", "value": title}}}
+        for title, _, _ in shown
+    ]
+    return CardFactory.adaptive_card(
+        {
+            "type": "AdaptiveCard",
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "version": "1.4",
+            "body": body,
+            "actions": actions,
+        }
+    )
+
+
 class TeamsBot(TeamsActivityHandler):
     def __init__(
         self, settings: Settings, mcp_servers: dict[str, str], attachment_store: "_AttachmentStore"
@@ -255,6 +315,11 @@ class TeamsBot(TeamsActivityHandler):
         # Cleared for a tenant on a bootstrap failure so the next message
         # retries (see on_message_activity).
         self._graph_ready: set[str] = set()
+        # Set by build_app; needed to post to a chat outside of a turn.
+        self.adapter: CloudAdapter | None = None
+        # One office job at a time, whether the scheduler or a user started it.
+        self.job_lock = asyncio.Lock()
+        self._background: set[asyncio.Task] = set()
 
     async def on_message_activity(self, turn_context: TurnContext) -> None:
         tenant_id = _tenant_id_of(turn_context)
@@ -291,6 +356,16 @@ class TeamsBot(TeamsActivityHandler):
             if not ready:
                 return  # sign-in card already sent; wait for the user to complete it and message again
 
+        command = _command_of(text)
+        if command == "Menü":
+            await turn_context.send_activity(Activity(attachments=[actions_card()]))
+            return
+        if command == "Büroarbeit":
+            await self._start_office_job(turn_context, tenant_id)
+            return
+        if command is not None:
+            text = _BY_KEY[command.lower()][2] or text
+
         try:
             async with McpToolHub(self._mcp_servers, tenant_id=tenant_id) as tool_hub:
                 result, history = await handle_message(
@@ -308,6 +383,24 @@ class TeamsBot(TeamsActivityHandler):
             return
 
         await self._send_result(turn_context, result)
+
+    async def _start_office_job(self, turn_context: TurnContext, tenant_id: str) -> None:
+        """Answer at once and run the job in the background: it takes minutes,
+        Teams gives a reply about 15 seconds. The result arrives as its own
+        message, like the scheduled run's."""
+        if self.job_lock.locked():
+            await turn_context.send_activity("⏳ Die Büroarbeit läuft schon, das Ergebnis kommt gleich.")
+            return
+        await turn_context.send_activity("⏳ Büroarbeit läuft, das Ergebnis kommt in ein paar Minuten.")
+
+        async def run() -> None:
+            async with self.job_lock:
+                status = await self.run_office_job(self.adapter, tenant_id)
+            logger.info("office job (on request) finished: tenant_id=%s %s", tenant_id, status)
+
+        task = asyncio.create_task(run())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def run_office_job(self, adapter: CloudAdapter, tenant_id: str) -> str:
         """The morning office round for one tenant: run the playbook over the
@@ -555,6 +648,7 @@ def build_app(settings: Settings) -> web.Application:
     adapter = build_adapter(settings)
     attachment_store = _AttachmentStore()
     bot = TeamsBot(settings, mcp_servers, attachment_store)
+    bot.adapter = adapter
 
     async def messages(req: web.Request) -> web.Response:
         return await adapter.process(req, bot)
@@ -582,8 +676,6 @@ def build_app(settings: Settings) -> web.Application:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    job_lock = asyncio.Lock()
-
     async def office_job(req: web.Request) -> web.Response:
         # The service is public (Teams must reach /api/messages); this route
         # authenticates its caller itself - see jobs.verify_invoker.
@@ -593,9 +685,9 @@ def build_app(settings: Settings) -> web.Application:
         except jobs.JobAuthError as exc:
             logger.warning("office job rejected: %s", exc)
             return web.json_response({"error": "unauthorized"}, status=401)
-        if job_lock.locked():
+        if bot.job_lock.locked():
             return web.json_response({"error": "a job is already running"}, status=409)
-        async with job_lock:
+        async with bot.job_lock:
             results = {
                 tenant_id: await bot.run_office_job(adapter, tenant_id) for tenant_id in state.tenants("conversation")
             }

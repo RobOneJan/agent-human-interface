@@ -64,6 +64,13 @@ Add-on     --adapter-->
   summary plus any approval cards to the user's Teams chat - the one they last
   wrote from, kept in `state.py`. The user must have messaged the bot once.
 
+- **Teams commands** (`teams_bot.COMMANDS`) - fixed actions: Büroarbeit (starts
+  the office job now, answers at once, result follows), Firmenüberblick, Offene
+  Rechnungen, Gemeinkosten, Menü (all of them as buttons). For a permanent menu
+  above the compose box, add the same titles in the Teams Developer Portal
+  (Apps -> this app -> App features -> Bot -> Commands, scope "Personal") and
+  publish the app update.
+
 - **`attachment_refs.py`** - hands a file from one MCP server to another without
   it passing through Claude: Claude only sees a short `attachment-ref:` value,
   which is swapped for the content in the arguments sent to the target server.

@@ -202,3 +202,56 @@ def test_stored_chat_reference_round_trips() -> None:
     restored = ConversationReference().deserialize(state.load("conversation", TENANT))
     assert restored.service_url == "https://smba.trafficmanager.net/emea/"
     assert restored.conversation.tenant_id == TENANT
+
+
+# --- Teams commands --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("typed", "command"),
+    [
+        ("Büroarbeit", "Büroarbeit"),
+        ("büroarbeit!", "Büroarbeit"),
+        ("  Buero ", "Büroarbeit"),
+        ("offene rechnungen", "Offene Rechnungen"),
+        ("Hilfe", "Menü"),
+        ("Büroarbeit für die Rechnung von Würth", None),
+        ("Leg die Rechnung ab", None),
+    ],
+)
+def test_only_exact_commands_are_commands(typed: str, command: str | None) -> None:
+    assert teams_bot._command_of(typed) == command
+
+
+def test_actions_card_has_a_button_per_command_that_sends_its_title() -> None:
+    card = teams_bot.actions_card().content
+    titles = [action["title"] for action in card["actions"]]
+    assert titles == ["Büroarbeit", "Firmenüberblick", "Offene Rechnungen", "Gemeinkosten"]
+    assert all(a["data"]["msteams"] == {"type": "imBack", "value": a["title"]} for a in card["actions"])
+
+
+async def test_buero_command_answers_at_once_and_runs_in_the_background(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    bot = _bot(monkeypatch)
+    bot.adapter = _FakeAdapter()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_job(adapter, tenant_id):
+        started.set()
+        await release.wait()
+        return "done"
+
+    monkeypatch.setattr(bot, "run_office_job", slow_job)
+    first, second = _FakeTurnContext(), _FakeTurnContext()
+
+    await bot._start_office_job(first, TENANT)
+    await started.wait()
+    await bot._start_office_job(second, TENANT)  # while the first still runs
+
+    assert "läuft, das Ergebnis kommt" in first.sent[0]
+    assert "läuft schon" in second.sent[0]
+    release.set()
+    await asyncio.gather(*bot._background)
+    assert not bot.job_lock.locked()
