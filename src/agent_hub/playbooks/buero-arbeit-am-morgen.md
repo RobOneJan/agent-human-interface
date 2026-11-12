@@ -7,11 +7,13 @@ Keine Übersichten, keine Fälligkeitslisten, keine Auswertungen.
 
 1. **E-Mails sammeln.** `search_emails` ohne Suchbegriff mit `limit` 50 liefert
    die neuesten Mails. Nur die verwenden, die im genannten Zeitraum eingegangen
-   sind. Eigene gesendete Mails, Newsletter, Werbung und automatische
+   sind. Schlägt der Abruf fehl, einmal erneut versuchen; klappt es dann nicht,
+   im Datenpaket unter `warnungen` "Postfach nicht erreichbar" melden. Eigene gesendete Mails, Newsletter, Werbung und automatische
    Benachrichtigungen ignorieren.
 
-2. **Rechnungen erkennen.** Eine Mail ist eine Lieferantenrechnung, wenn sie
-   eine Rechnung als PDF oder XML anhängt (Betreff oder Dateiname wie Rechnung,
+2. **Rechnungen erkennen.** Nur Mails mit `has_attachments` = true kommen in
+   Frage; die anderen gar nicht erst öffnen. Eine Mail ist eine
+   Lieferantenrechnung, wenn sie eine Rechnung als PDF oder XML anhängt (Betreff oder Dateiname wie Rechnung,
    Invoice, RE-, RG-, ZUGFeRD, XRechnung). Lieferscheine, Angebote,
    Auftragsbestätigungen und Mahnungen sind keine Rechnungen. Im Zweifel
    `get_email` lesen. Andere Mails werden nicht bearbeitet und nicht erwähnt.
