@@ -54,7 +54,7 @@ from botbuilder.schema import (
 from botframework.connector.auth.user_token_client import UserTokenClient
 
 import httpx2
-from agent_hub import jobs, state
+from agent_hub import jobs, morning_report, state
 from agent_hub.approvals import ApprovalDecisionError, decide_approval
 from agent_hub.auth import fetch_auth_header
 from agent_hub.config import Settings, get_settings
@@ -443,11 +443,30 @@ class TeamsBot(TeamsActivityHandler):
         self._chat_history[tenant_id] = history
 
         async def deliver(turn_context: TurnContext) -> None:
-            await self._send_result(turn_context, result)
+            await self._send_office_result(turn_context, result, now)
 
         await adapter.continue_conversation(reference, deliver, self._settings.teams_app_id)
         jobs.mark_done(tenant_id, now)
         return f"done: {result.tool_call_count} tool calls, {len(result.pending_approvals)} approvals"
+
+    async def _send_office_result(self, turn_context: TurnContext, result: OrchestratorResult, now) -> None:
+        """The office job's report as one card, its approval cards after it.
+        Falls back to the plain reply if the agent didn't answer with the
+        report's JSON - see morning_report.parse."""
+        bericht = morning_report.parse(result.text or "")
+        if bericht is None:
+            await self._send_result(turn_context, result)
+            return
+        await turn_context.send_activity(
+            Activity(attachments=[morning_report.card(bericht, now, format_cost_line(result))])
+        )
+        for pending in result.pending_approvals:
+            await turn_context.send_activity(
+                Activity(
+                    text=f"{_STATUS_EMOJI[Status.PENDING_APPROVAL]} {pending.message}",
+                    attachments=[approval_card(pending)],
+                )
+            )
 
     async def _send_result(self, turn_context: TurnContext, result: OrchestratorResult) -> None:
         await turn_context.send_activity(format_reply(result))
