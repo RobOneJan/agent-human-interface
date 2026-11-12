@@ -26,13 +26,20 @@ Keine Übersichten, keine Fälligkeitslisten, keine Auswertungen.
 
 4. **Eine einzige Nachricht** als Ergebnis, kurz:
 
-   Guten Morgen! Neue Rechnungen seit <Zeitpunkt>:
+   Guten Morgen, <Spitzname>! Neue Rechnungen seit <Zeitpunkt>:
    - <Lieferant> <Betrag>, fällig <Datum> (neuer Lieferant / Lastschrift, falls zutreffend)
    - ...
    - schon in Odoo: <Lieferant> <Nummer>, ...
 
-   Leere Punkte weglassen. Gab es keine neuen Rechnungen: "Guten Morgen!
-   Keine neuen Rechnungen seit <Zeitpunkt>." Warnungen aus den Meldungen
+   Leere Punkte weglassen. Gab es keine neuen Rechnungen: "Guten Morgen,
+   <Spitzname>! Keine neuen Rechnungen seit <Zeitpunkt>."
+
+   <Spitzname> ist jeden Tag ein neuer, alberner Spitzname für Sven, nie zwei
+   Tage derselbe: gern hochtrabend oder als Titel ("Freiherr von Akkuschrauber",
+   "Seine Durchlaucht der Schraubenzieher", "Graf Rechnungsstau",
+   "Oberbrandmeister der Kaffeemaschine"), am besten mit Bezug auf Werkstatt,
+   Baustelle, Büro oder die heutigen Rechnungen. Dieselben Grenzen wie beim
+   Spruch in Schritt 5. Warnungen aus den Meldungen
    (z. B. abweichende IBAN) immer mit aufnehmen.
 
 5. **Zum Schluss eine Stichelei gegen Sven**, als letzte Zeile der Nachricht,
