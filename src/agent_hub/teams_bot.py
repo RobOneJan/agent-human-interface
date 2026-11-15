@@ -94,8 +94,26 @@ def format_cost_line(result: OrchestratorResult) -> str | None:
     return f"Kosten: {result.cost_usd * 100:.2f}ct"
 
 
-def _approval_value(action: str, server: str, approval_id: str) -> dict:
-    return {"action": action, "server": server, "approval_id": approval_id}
+# Keys of a card's submit data that are not payload edits. "_titel" carries the
+# approval's text back, so the card can be replaced by its outcome.
+_CARD_KEYS = ("action", "server", "approval_id", "_titel")
+
+
+def _approval_value(action: str, server: str, approval_id: str, titel: str = "") -> dict:
+    return {"action": action, "server": server, "approval_id": approval_id, "_titel": titel[:300]}
+
+
+def closed_card(text: str) -> BotAttachment:
+    """What an approval card turns into once decided: its outcome, no buttons -
+    so a second tap can't send the decision again."""
+    return CardFactory.adaptive_card(
+        {
+            "type": "AdaptiveCard",
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "version": "1.4",
+            "body": [{"type": "TextBlock", "text": text, "wrap": True}],
+        }
+    )
 
 
 def approval_card(pending: PendingApproval) -> BotAttachment:
@@ -124,12 +142,12 @@ def approval_card(pending: PendingApproval) -> BotAttachment:
             {
                 "type": "Action.Submit",
                 "title": "✅ Freigeben",
-                "data": _approval_value("approve", pending.server, pending.approval_id),
+                "data": _approval_value("approve", pending.server, pending.approval_id, pending.message),
             },
             {
                 "type": "Action.Submit",
                 "title": "❌ Ablehnen",
-                "data": _approval_value("reject", pending.server, pending.approval_id),
+                "data": _approval_value("reject", pending.server, pending.approval_id, pending.message),
             },
         ],
     }
@@ -500,14 +518,17 @@ class TeamsBot(TeamsActivityHandler):
         token = self._attachment_store.put(attachment.data, attachment.content_type, attachment.filename)
         return f"📎 {attachment.filename}: {base_url}/attachments/{token}"
 
-    async def _resume_after_approval(self, turn_context: TurnContext, tenant_id: str, approval_id: str) -> None:
+    async def _resume_after_approval(self, reference: ConversationReference, tenant_id: str, approval_id: str) -> None:
         """Continue the SAME conversation right after a human approves via the
         Teams card - without this, approving only updated the server-side
         approval status; nothing ever told the LLM to actually act on it, so
         the send/execute tool call never happened until the user separately
         asked (e.g. "did you send it?") in a brand new turn. This resumes
         with an explicit system-style instruction so the model reliably calls
-        the follow-up tool instead of maybe re-answering from stale context."""
+        the follow-up tool instead of maybe re-answering from stale context.
+
+        Runs after the card's turn has ended (see _handle_approval_callback),
+        so it posts through the conversation reference, not a turn context."""
         prompt = (
             f"[System] A human just approved pending approval {approval_id}. "
             "Proceed now to complete the corresponding action (call the "
@@ -524,13 +545,29 @@ class TeamsBot(TeamsActivityHandler):
                     effort=self._settings.claude_effort,
                 )
             self._chat_history[tenant_id] = history
-        except Exception:
+        except Exception as exc:
             logger.exception("failed to resume after approval for tenant_id=%s", tenant_id)
-            await turn_context.send_activity(
-                "Approved, but I couldn't complete the follow-up action automatically - ask me to proceed."
-            )
+            failure = f"Freigegeben, aber der nächste Schritt hat nicht geklappt. {user_message(exc)}"
+
+            async def report(turn_context: TurnContext) -> None:
+                await turn_context.send_activity(failure)
+
+            await self.adapter.continue_conversation(reference, report, self._settings.teams_app_id)
             return
-        await self._send_result(turn_context, result)
+
+        async def deliver(turn_context: TurnContext) -> None:
+            await self._send_result(turn_context, result)
+
+        await self.adapter.continue_conversation(reference, deliver, self._settings.teams_app_id)
+
+    async def _close_card(self, turn_context: TurnContext, text: str) -> None:
+        card_id = turn_context.activity.reply_to_id
+        if not card_id:
+            return
+        try:
+            await turn_context.update_activity(Activity(id=card_id, type="message", attachments=[closed_card(text)]))
+        except Exception:  # a card that stays is cosmetic; the decision itself stands
+            logger.warning("could not replace the approval card", exc_info=True)
 
     async def _ensure_graph_bootstrap(
         self, turn_context: TurnContext, tenant_id: str, magic_code: str | None = None
@@ -612,10 +649,12 @@ class TeamsBot(TeamsActivityHandler):
         # edited it right there before tapping approve. Applied server-side,
         # atomically with the approve decision (never through the LLM) - see
         # `decide_approval`'s own docstring for why that boundary matters.
-        edits = {k: v for k, v in value.items() if k not in ("action", "server", "approval_id")}
+        edits = {k: v for k, v in value.items() if k not in _CARD_KEYS}
+        titel = str(value.get("_titel") or "").strip()
+        about = f": {titel}" if titel else ""
 
         try:
-            decision = await decide_approval(
+            await decide_approval(
                 server_url,
                 approval_id,
                 tenant_id,
@@ -624,15 +663,27 @@ class TeamsBot(TeamsActivityHandler):
             )
         except ApprovalDecisionError as exc:
             logger.warning("approval decision failed: tenant_id=%s detail=%s", tenant_id, exc.detail)
+            if exc.status_code == 409:
+                # A second tap, or Teams delivering the same tap twice: the
+                # first one already decided. Nothing went wrong.
+                await self._close_card(turn_context, f"Erledigt{about}")
+                await turn_context.send_activity("ℹ️ Diese Freigabe ist schon erledigt.")
+                return
             await turn_context.send_activity(f"{_STATUS_EMOJI[Status.ERROR]} Couldn't {action}: {exc.detail}")
             return
 
-        if action == "approve":
-            await turn_context.send_activity(f"{_STATUS_EMOJI[Status.AUTONOMOUS]} Freigegeben – schließe ab...")
-            await self._resume_after_approval(turn_context, tenant_id, approval_id)
+        if action != "approve":
+            await self._close_card(turn_context, f"❌ Abgelehnt{about}")
             return
 
-        await turn_context.send_activity(f"{_STATUS_EMOJI[Status.ERROR]} Abgelehnt ({decision['status']}).")
+        await self._close_card(turn_context, f"✅ Freigegeben{about} – wird ausgeführt …")
+        # The follow-up runs the agent and can take longer than Teams waits for
+        # an answer; Teams then delivers the tap again. Answer now, finish in
+        # the background, post the result when it's there.
+        reference = TurnContext.get_conversation_reference(turn_context.activity)
+        task = asyncio.create_task(self._resume_after_approval(reference, tenant_id, approval_id))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
 
 class _BotFrameworkConfig:

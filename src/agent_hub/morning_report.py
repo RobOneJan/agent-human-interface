@@ -64,10 +64,13 @@ def _row(cells: list[tuple[str, dict]], sub: str = "", **container) -> dict:
     """One table row; `sub` is a second, smaller line under the first cell (the
     invoice number) - a separate block, since Teams doesn't reliably render a
     line break inside one."""
-    widths = ("40", "20", "18", "22")
+    # Relative weights must be numbers: Teams rejects a whole card whose
+    # column width is a numeric string like "40" (shows "card unsupported"),
+    # though the published schema lets strings through.
+    widths = (40, 20, 18, 22)
     columns = []
     for index, (width, (text, style)) in enumerate(zip(widths, cells)):
-        items = [_text(text, size="small", **style)]
+        items = [_text(text or "–", size="small", **style)]
         if index == 0 and sub:
             items.append(_text(sub, size="small", isSubtle=True, spacing="none"))
         columns.append({"type": "Column", "width": width, "items": items})
@@ -143,7 +146,6 @@ def card(bericht: Bericht, now: datetime, cost_line: str | None) -> Attachment:
             "type": "AdaptiveCard",
             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
             "version": "1.4",
-            "msteams": {"width": "Full"},
             "body": body,
         }
     )
