@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-# Teams is the primary channel now - see teams_bot.py's module docstring.
-# telegram_bot.py stays importable (not deleted) in case both channels need
-# to run from one process later; swap this import back to re-enable it.
-from agent_hub.teams_bot import run
-
-# from agent_hub.telegram_bot import run
+import os
 
 
 def main() -> None:
+    # CHANNEL picks the adapter (see config.Settings.channel); Teams stays the
+    # default so existing deployments need no change.
+    if os.environ.get("CHANNEL", "teams").strip().lower() == "telegram":
+        from agent_hub.telegram_bot import run
+    else:
+        from agent_hub.teams_bot import run
     run()
 
 

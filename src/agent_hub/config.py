@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     # See parsed_chat_tenants(). Empty by default now that Telegram isn't run.
     telegram_allowed_chat_ids: str = ""
 
+    # Which chat channel main.py runs: "teams" (default) or "telegram". One
+    # image serves both, so a second deployment (e.g. another customer on
+    # Telegram) is configuration, not a code change.
+    channel: str = "teams"
+
+    # Telegram via webhook instead of long polling, so the service can scale
+    # to zero between messages: this service's public HTTPS origin (Telegram
+    # posts updates to <url>/telegram) and a random secret Telegram echoes in
+    # every request's X-Telegram-Bot-Api-Secret-Token header. Unset: polling.
+    telegram_webhook_url: str | None = None
+    telegram_webhook_secret: str | None = None
+
     # Real HTTP port under Teams (teams_bot.py's aiohttp app listens here);
     # was only a health-check placeholder under Telegram's long-polling
     # model. See main.py.

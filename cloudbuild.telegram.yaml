@@ -1,0 +1,66 @@
+# A Telegram instance of agent-hub for one customer, beside the Teams one
+# (cloudbuild.yaml): same image, its own service, bot, MCP servers, playbooks
+# and state. Example (the Bauakte test stack):
+#
+#   gcloud builds submit --config cloudbuild.telegram.yaml --substitutions=\
+#   _SERVICE=agent-hub-bauakte,_MCP_SERVERS="email=https://email-mcp-bauakte-...run.app/mcp~bauakte=https://bauakte-mcp-...run.app/mcp",\
+#   _PUBLIC_URL=https://agent-hub-bauakte-...run.app,_TELEGRAM_ALLOWED_CHAT_IDS=<your chat id>
+#
+# _MCP_SERVERS separates servers with "~" (not ",": gcloud and Cloud Build
+# both split on commas); it is turned back into MCP_SERVERS' "," below.
+#
+# Webhook, not polling: Telegram posts every update to <_PUBLIC_URL>/telegram,
+# so the service scales to zero between messages. Public (Telegram has no
+# Google identity); python-telegram-bot rejects any request without the secret
+# token header, and only _TELEGRAM_ALLOWED_CHAT_IDS get answers.
+# --no-cpu-throttling: an update is acknowledged first and worked on after.
+#
+# Secrets in Secret Manager, per instance: <_SERVICE>-telegram-bot-token,
+# <_SERVICE>-telegram-webhook-secret; the Anthropic key is _ANTHROPIC_SECRET.
+# Playbooks: upload them to gs://$PROJECT_ID-<_SERVICE>-var/playbooks/.
+substitutions:
+  _REGION: europe-west3
+  _REPO: agent-hub
+  _SERVICE: agent-hub-telegram
+  _MCP_SERVERS: ""
+  _PUBLIC_URL: ""
+  _TELEGRAM_ALLOWED_CHAT_IDS: ""
+  _ANTHROPIC_SECRET: agent-hub-anthropic-api-key
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        MCP_SERVERS=$(echo "${_MCP_SERVERS}" | tr '~' ',')
+        gcloud run deploy ${_SERVICE} \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID \
+          --region=${_REGION} --platform=managed \
+          --allow-unauthenticated \
+          --min-instances=0 --max-instances=1 --no-cpu-throttling --timeout=1800 \
+          --add-volume=name=var,type=cloud-storage,bucket=$PROJECT_ID-${_SERVICE}-var \
+          --add-volume-mount=volume=var,mount-path=/app/var \
+          --service-account=${_SERVICE}-run@$PROJECT_ID.iam.gserviceaccount.com \
+          --set-secrets=TELEGRAM_BOT_TOKEN=${_SERVICE}-telegram-bot-token:latest,TELEGRAM_WEBHOOK_SECRET=${_SERVICE}-telegram-webhook-secret:latest,ANTHROPIC_API_KEY=${_ANTHROPIC_SECRET}:latest \
+          --set-env-vars="^~^CHANNEL=telegram~MCP_SERVERS=$${MCP_SERVERS}~TELEGRAM_WEBHOOK_URL=${_PUBLIC_URL}~TELEGRAM_ALLOWED_CHAT_IDS=${_TELEGRAM_ALLOWED_CHAT_IDS}~PLAYBOOK_DIR=/app/var/playbooks~STATE_DIR=/app/var"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY
