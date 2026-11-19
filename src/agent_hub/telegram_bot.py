@@ -9,13 +9,14 @@ adapter, not touching this logic.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 import sys
 
 from anthropic import AsyncAnthropic
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 from agent_hub import state
@@ -24,6 +25,7 @@ from agent_hub.config import Settings, get_settings
 from agent_hub.errors import user_message
 from agent_hub.health_server import start_health_server
 from agent_hub.mcp_client import McpToolHub
+from agent_hub.telegram_form import serve_webhook
 from agent_hub.orchestrator import OrchestratorResult, PendingApproval, Status, handle_message
 
 logger = logging.getLogger(__name__)
@@ -78,9 +80,9 @@ def parse_approval_callback_data(data: str) -> tuple[str, str, str]:
     return action, server, approval_id
 
 
-def approval_keyboard(pending: PendingApproval) -> InlineKeyboardMarkup:
+def approval_keyboard(pending: PendingApproval, form_base: str | None = None) -> InlineKeyboardMarkup:
     if pending.compact:
-        return tile_keyboard(pending.server, pending.approval_id)
+        return tile_keyboard(pending.server, pending.approval_id, form_base)
     return InlineKeyboardMarkup(
         [
             [
@@ -105,12 +107,19 @@ def approval_keyboard(pending: PendingApproval) -> InlineKeyboardMarkup:
 _FOLDER_NR = re.compile(r"^\s*([PBKZ])\s?(\d+(?:\.\d+)*)", re.IGNORECASE)
 
 
-def tile_keyboard(server: str, approval_id: str) -> InlineKeyboardMarkup:
+def tile_keyboard(server: str, approval_id: str, form_base: str | None = None) -> InlineKeyboardMarkup:
+    """With a public URL (webhook mode) the tile opens the editable form
+    (telegram_form.py); without one, the folder is changed with buttons."""
+    decide = [
+        InlineKeyboardButton("✅ Freigeben", callback_data=approval_callback_data("approve", server, approval_id)),
+        InlineKeyboardButton("❌ Ablehnen", callback_data=approval_callback_data("nein", server, approval_id)),
+    ]
+    if form_base:
+        edit = InlineKeyboardButton("📝 Vorschlag bearbeiten",
+                                    web_app=WebAppInfo(url=f"{form_base.rstrip('/')}/kachel?id={approval_id}"))
+        return InlineKeyboardMarkup([[edit], decide])
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Freigeben", callback_data=approval_callback_data("approve", server, approval_id)),
-            InlineKeyboardButton("❌ Ablehnen", callback_data=approval_callback_data("nein", server, approval_id)),
-        ],
+        decide,
         [InlineKeyboardButton("📁 Ordner ändern", callback_data=approval_callback_data("ordner", server, approval_id))],
     ])
 
@@ -165,6 +174,7 @@ def build_application(settings: Settings) -> Application:
     # second instance that wouldn't share this state. Lost on restart, same
     # as drop_pending_updates already accepts for the Telegram side.
     chat_history: dict[int, list[dict]] = {}
+    form_base = settings.telegram_webhook_url
 
     async def respond(message, chat_id: int, tenant_id: str, text: str) -> None:
         """One agent turn for this chat, and its reply, files and approval
@@ -193,10 +203,12 @@ def build_application(settings: Settings) -> Application:
                 filename=attachment.filename,
             )
         for pending in result.pending_approvals:
-            await message.reply_text(format_pending(pending), reply_markup=approval_keyboard(pending))
+            tile = await message.reply_text(format_pending(pending), reply_markup=approval_keyboard(pending, form_base))
             if pending.compact:
-                # For "Ordner ändern" later - this service scales to zero, so not in memory.
-                state.save("kachel", pending.approval_id, {"options": pending.options})
+                # For "Ordner ändern" and the form later - this service scales to zero, so not in memory.
+                state.save("kachel", pending.approval_id, {
+                    "options": pending.options, "server": pending.server, "chat_id": chat_id,
+                    "message_id": getattr(tile, "message_id", None)})
         cost_line = format_cost_line(result)
         if cost_line is not None:
             await message.reply_text(cost_line)
@@ -236,7 +248,7 @@ def build_application(settings: Settings) -> Application:
                 await context.bot.edit_message_text(
                     chat_id=chat_id, message_id=eingabe["message_id"],
                     text=f"{_STATUS_EMOJI[Status.PENDING_APPROVAL]} {antwort['message']}",
-                    reply_markup=tile_keyboard(eingabe["server"], eingabe["approval_id"]),
+                    reply_markup=tile_keyboard(eingabe["server"], eingabe["approval_id"], form_base),
                 )
                 await message.reply_text("📁 Ordner geändert - oben freigeben.")
             else:
@@ -277,12 +289,12 @@ def build_application(settings: Settings) -> Application:
             await query.edit_message_reply_markup(folder_keyboard(server, approval_id, kachel.get("options", [])))
             return
         if action == "zurueck":
-            await query.edit_message_reply_markup(tile_keyboard(server, approval_id))
+            await query.edit_message_reply_markup(tile_keyboard(server, approval_id, form_base))
             return
         if action == "frei":
             state.save("eingabe", str(chat.id), {"art": "ordner", "server": server, "approval_id": approval_id,
                                                  "message_id": query.message.message_id})
-            await query.edit_message_reply_markup(tile_keyboard(server, approval_id))
+            await query.edit_message_reply_markup(tile_keyboard(server, approval_id, form_base))
             await query.message.reply_text(ORDNER_FRAGE, reply_markup=ForceReply(selective=True))
             return
         if action == "o":
@@ -292,7 +304,7 @@ def build_application(settings: Settings) -> Application:
                 await query.message.reply_text(f"{_STATUS_EMOJI[Status.ERROR]} {exc.detail}")
                 return
             await query.edit_message_text(f"{_STATUS_EMOJI[Status.PENDING_APPROVAL]} {antwort['message']}",
-                                          reply_markup=tile_keyboard(server, approval_id))
+                                          reply_markup=tile_keyboard(server, approval_id, form_base))
             return
 
         approve = action == "approve"
@@ -320,6 +332,23 @@ def build_application(settings: Settings) -> Application:
             await query.message.reply_text(GRUND_FRAGE, reply_markup=ForceReply(selective=True))
 
     application = Application.builder().token(settings.telegram_bot_token).build()
+
+    class _Chat:
+        """Replies into a chat without a message to answer (after a form decision)."""
+
+        def __init__(self, chat_id: int) -> None:
+            self.chat_id = chat_id
+
+        async def reply_text(self, text: str, **kwargs):
+            return await application.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
+
+        async def reply_document(self, **kwargs):
+            return await application.bot.send_document(chat_id=self.chat_id, **kwargs)
+
+    async def resume(chat_id: int, tenant_id: str, approval_id: str) -> None:
+        await respond(_Chat(chat_id), chat_id, tenant_id, RESUME_PROMPT.format(approval_id=approval_id))
+
+    application.bot_data.update(chat_tenants=chat_tenants, mcp_servers=mcp_servers, resume=resume)
     application.add_handler(MessageHandler(filters.TEXT, on_message))
     application.add_handler(CallbackQueryHandler(on_approval_callback))
     return application
@@ -339,21 +368,15 @@ def run() -> None:
             sys.exit("TELEGRAM_WEBHOOK_SECRET is required with TELEGRAM_WEBHOOK_URL")
         logger.info("agent-hub starting (Telegram webhook): MCP servers: %s",
                     ", ".join(settings.parsed_mcp_servers()))
-        # Telegram posts each update to <url>/telegram; python-telegram-bot
+        # Telegram posts each update to <url>/telegram; our own aiohttp server
+        # (telegram_form.py, which also serves the editable approval form)
         # answers 200 at once and rejects requests without the secret header,
         # so the public URL alone lets nobody inject updates. Answering first
         # and working afterwards needs CPU after the response - deploy with
         # --no-cpu-throttling.
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=settings.port,
-            url_path="telegram",
-            webhook_url=f"{settings.telegram_webhook_url.rstrip('/')}/telegram",
-            secret_token=settings.telegram_webhook_secret,
-            # Not dropped, unlike polling: after scaling to zero, the update
-            # that wakes this instance is still pending while it starts.
-            drop_pending_updates=False,
-        )
+        asyncio.run(serve_webhook(application, port=settings.port, public_url=settings.telegram_webhook_url,
+                                  bot_token=settings.telegram_bot_token,
+                                  webhook_secret=settings.telegram_webhook_secret))
         return
     start_health_server(settings.port)  # Cloud Run's health probe only; not a real API
     logger.info(
