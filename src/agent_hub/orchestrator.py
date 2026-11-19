@@ -107,6 +107,11 @@ class PendingApproval:
     # of this shape: whatever a server puts here is shown, nothing hardcoded
     # to one server's field names.
     payload: dict[str, str] = field(default_factory=dict)
+    # Optional, from servers whose approvals are edited in the channel itself
+    # (bauakte-mcp): show only `message`, and offer `options` as one-tap
+    # choices. Absent for every other server, which keeps the old rendering.
+    compact: bool = False
+    options: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -395,7 +400,14 @@ async def _run_tool(
         raw_payload = data.get("payload")
         payload = {k: str(v) for k, v in raw_payload.items()} if isinstance(raw_payload, dict) else {}
         pending_approvals.append(
-            PendingApproval(server=server_name, approval_id=data["id"], message=data["message"], payload=payload)
+            PendingApproval(
+                server=server_name,
+                approval_id=data["id"],
+                message=data["message"],
+                payload=payload,
+                compact=data.get("compact") is True,
+                options=[str(o) for o in data.get("options") or [] if isinstance(o, str)][:3],
+            )
         )
         tool_status = Status.PENDING_APPROVAL
 

@@ -63,3 +63,24 @@ async def decide_approval(
         detail = response.json().get("error", response.text) if response.content else response.text
         raise ApprovalDecisionError(response.status_code, detail)
     return response.json()
+
+
+async def post_approval_route(
+    mcp_server_url: str,
+    approval_id: str,
+    tenant_id: str,
+    route: str,
+    body: dict[str, str],
+) -> dict:
+    """Any other human-only route of a server's approval, e.g. bauakte-mcp's
+    `ordner` (pick another folder, stays pending) and `begruendung` (why it
+    was rejected). Same boundary as `decide_approval`: called from a
+    channel's own handler of a human's input, never from the tool loop."""
+    url = f"{_base_url(mcp_server_url)}/internal/approvals/{approval_id}/{route}?tenant={tenant_id}"
+    headers = fetch_auth_header(mcp_server_url)
+    async with httpx2.AsyncClient(timeout=15.0) as client:
+        response = await client.post(url, headers=headers, json=body)
+    if response.status_code != 200:
+        detail = response.json().get("error", response.text) if response.content else response.text
+        raise ApprovalDecisionError(response.status_code, detail)
+    return response.json()
